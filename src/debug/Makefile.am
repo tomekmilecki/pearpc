@@ -11,3 +11,6 @@ debugparse.y debugtype.h lex.l lex.h parsehelper.c parsehelper.h debugger.cc deb
 stdfuncs.cc stdfuncs.h debugparse.h x86opc.cc x86opc.h x86dis.cc x86dis.h
 
 AM_CPPFLAGS = -I ..
+
+BUILT_SOURCES = debugparse.h
+lex.$(OBJEXT): debugparse.h
