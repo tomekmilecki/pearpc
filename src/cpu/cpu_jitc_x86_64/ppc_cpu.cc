@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <unistd.h>
 
 #include "debug/tracers.h"
@@ -266,6 +267,18 @@ JITC *gJITC;
 bool ppc_cpu_init()
 {
 	gCPU = ppc_malloc(sizeof *gCPU);
+	// The JIT encodes the address of the CPU state as a 32-bit absolute
+	// value in generated code, so the whole struct must live in the low 4GB.
+	// A non-PIE executable gets a low heap and satisfies this; a PIE one
+	// does not. Written to avoid overflowing when the allocation sits near
+	// the top of the address space.
+	if (uintptr_t(gCPU) > 0xffffffffULL - (sizeof *gCPU - 1)) {
+		PPC_CPU_ERR("CPU state allocated at %p, which does not fit in the "
+			"low 4GB. The x86_64 JIT encodes its address as a 32-bit "
+			"absolute value, so the allocation must sit below 4GB; linking "
+			"the executable non-PIE (-no-pie) is the usual way to get a "
+			"low heap.\n", gCPU);
+	}
 	memset(gCPU, 0, sizeof *gCPU);
 	gCPU->pvr = gConfig->getConfigUInt(CPU_KEY_PVR);
 

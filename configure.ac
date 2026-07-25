@@ -236,6 +236,61 @@ AC_PROG_CXX
 AC_PROG_CPP
 AM_PROG_AS
 
+dnl The x86_64 JIT backend has two distinct address requirements:
+dnl
+dnl   - it embeds absolute 32-bit addresses of the CPU state into generated
+dnl     code, so the CPU state allocation must sit below 4GB;
+dnl   - it reaches native helper routines with call rel32, whose signed 32-bit
+dnl     displacement means those helpers must be within +-2GB of the
+dnl     translation cache.
+dnl
+dnl Both used to be satisfied by the default non-PIE link.  Toolchains
+dnl defaulting to PIE (Arch, Fedora, Ubuntu, ...) load the executable around
+dnl 0x5555xxxxxxxx instead, which also pushes the heap up there; the
+dnl displacements silently truncate and the emulator jumps into hyperspace on
+dnl the first translated instruction.
+dnl
+dnl This does not apply to cpu_jitc_x86: in a 32-bit process every address
+dnl already fits in 32 bits and call rel32 reaches the whole address space, so
+dnl PIE is harmless there and worth keeping for ASLR.
+dnl
+dnl Only the link mode matters: PIC/PIE objects work fine in a non-PIE
+dnl executable, so -fno-pie is deliberately NOT added -- putting it in CFLAGS
+dnl would break later configure link tests, which are still linked as PIE.
+dnl
+dnl The probes below describe the toolchain's defaults, not the final binary,
+dnl so the runtime checks in ppc_cpu_init()/asmCALL() remain the real guard.
+case "$CPU_DIR" in
+cpu_jitc_x86_64)
+	AC_MSG_CHECKING([whether $CC defaults to PIE])
+	AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+#ifndef __PIE__
+#error not pie
+#endif
+	]])], [ppc_cc_pie=yes], [ppc_cc_pie=no])
+	AC_MSG_RESULT([$ppc_cc_pie])
+
+	AC_MSG_CHECKING([whether the linker accepts -no-pie])
+	ac_save_LDFLAGS="$LDFLAGS"
+	LDFLAGS="$LDFLAGS -no-pie"
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
+		[ppc_ld_nopie=yes], [ppc_ld_nopie=no])
+	LDFLAGS="$ac_save_LDFLAGS"
+	AC_MSG_RESULT([$ppc_ld_nopie])
+
+	if test "x$ppc_ld_nopie" = xyes; then
+		PPC_LDFLAGS="$PPC_LDFLAGS -no-pie"
+	elif test "x$ppc_cc_pie" = xyes; then
+		dnl PIE by default and no way to turn it off: the resulting binary
+		dnl would load above 4GB and crash on the first translated
+		dnl instruction.  Refuse rather than ship a known-broken build.
+		AC_MSG_ERROR([*** $CPU_DIR requires a non-PIE executable, but $CC
+defaults to PIE and the linker does not accept -no-pie. Rebuild with a
+toolchain supporting -no-pie, or configure with --enable-cpu=generic. ***])
+	fi
+;;
+esac
+
 dnl To ensure backward compatibility, Automake's `AM_PROG_LEX' invokes
 dnl (indirectly) this macro twice, which will cause an annoying but
 dnl benign "`AC_PROG_LEX' invoked multiple times" warning.  Future
