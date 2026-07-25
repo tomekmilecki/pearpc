@@ -41,13 +41,13 @@ for cfg in "${TESTS[@]}"; do
 
     if [ ! -f "$elf" ]; then
         printf "%-24s SKIP (no .elf)\n" "$name"
-        ((skipped++))
+        skipped=$((skipped + 1))
         continue
     fi
 
     if output=$(timeout "$TIMEOUT" "$PPC" --headless "$cfg" 2>&1); then
         printf "%-24s PASS\n" "$name"
-        ((passed++))
+        passed=$((passed + 1))
     else
         rc=$?
         if [ $rc -eq 124 ]; then
@@ -57,7 +57,7 @@ for cfg in "${TESTS[@]}"; do
             echo "$output" | tail -5 | sed 's/^/  /'
         fi
         failures+=("$name")
-        ((failed++))
+        failed=$((failed + 1))
     fi
 done
 
