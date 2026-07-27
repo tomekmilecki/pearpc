@@ -5,7 +5,7 @@ VERSION=0.6pre
 AC_INIT(PACKAGE, VERSION)
 
 dnl Check the system.
-AC_CANONICAL_SYSTEM
+AC_CANONICAL_TARGET
 
 AC_SUBST(PACKAGE)
 AC_SUBST(VERSION)
@@ -67,7 +67,7 @@ fi
 AC_CONFIG_SRCDIR([src/system/types.h])
 AM_INIT_AUTOMAKE(no-define)
 
-AC_CONFIG_HEADER(config.h)
+AC_CONFIG_HEADERS([config.h])
 
 dnl Check OS specifica
 
@@ -236,13 +236,70 @@ AC_PROG_CXX
 AC_PROG_CPP
 AM_PROG_AS
 
+dnl On Linux, the x86_64 JIT maps its translation cache below 2GB with
+dnl MAP_32BIT.  Generated code reaches native helper routines in the executable
+dnl with call rel32, whose signed 32-bit displacement requires those helpers to
+dnl be within +-2GB of the translation cache.  A non-PIE executable loads low
+dnl enough to satisfy that requirement, while toolchains defaulting to PIE
+dnl (Arch, Fedora, Ubuntu, ...) load it around 0x5555xxxxxxxx; the displacement
+dnl then exceeds rel32's range and used to be silently truncated.
+dnl
+dnl This configure workaround restores the required Linux layout.  On systems
+dnl without MAP_32BIT, including macOS where it is defined to zero, mmap may
+dnl place the translation cache anywhere; asmCALL() therefore remains the
+dnl platform-independent runtime guard for the rel32 requirement.
+dnl
+dnl This does not apply to cpu_jitc_x86: in a 32-bit process every address
+dnl already fits in 32 bits and call rel32 reaches the whole address space, so
+dnl PIE is harmless there and worth keeping for ASLR.
+dnl
+dnl Only the link mode matters: PIC/PIE objects work fine in a non-PIE
+dnl executable, so -fno-pie is deliberately NOT added -- putting it in CFLAGS
+dnl would break later configure link tests, which are still linked as PIE.
+dnl
+dnl The probes below describe the toolchain's defaults, not the final binary.
+case "$CPU_DIR" in
+cpu_jitc_x86_64)
+	AC_LANG_PUSH([C++])
+
+	AC_MSG_CHECKING([whether $CXX defaults to PIE])
+	AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+#ifndef __PIE__
+#error not pie
+#endif
+	]])], [ppc_cxx_pie=yes], [ppc_cxx_pie=no])
+	AC_MSG_RESULT([$ppc_cxx_pie])
+
+	AC_MSG_CHECKING([whether the linker accepts -no-pie])
+	ac_save_LDFLAGS="$LDFLAGS"
+	LDFLAGS="$LDFLAGS -no-pie"
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
+		[ppc_ld_nopie=yes], [ppc_ld_nopie=no])
+	LDFLAGS="$ac_save_LDFLAGS"
+	AC_MSG_RESULT([$ppc_ld_nopie])
+
+	if test "x$ppc_ld_nopie" = xyes; then
+		PPC_LDFLAGS="$PPC_LDFLAGS -no-pie"
+	elif test "x$ppc_cxx_pie" = xyes; then
+		dnl PIE by default and no way to turn it off: on Linux the native
+		dnl helpers would be outside rel32 range of the MAP_32BIT
+		dnl translation cache.  Refuse rather than ship a known-broken build.
+		AC_MSG_ERROR([*** $CPU_DIR requires a non-PIE executable, but $CXX
+defaults to PIE and the linker does not accept -no-pie. Rebuild with a
+toolchain supporting -no-pie, or configure with --enable-cpu=generic. ***])
+	fi
+
+	AC_LANG_POP([C++])
+;;
+esac
+
 dnl To ensure backward compatibility, Automake's `AM_PROG_LEX' invokes
 dnl (indirectly) this macro twice, which will cause an annoying but
 dnl benign "`AC_PROG_LEX' invoked multiple times" warning.  Future
 dnl versions of Automake will fix this issue; meanwhile, just ignore
 dnl this message.
 dnl --- GNU Autoconf (version 2.58, 18 March 2004)
-AM_PROG_LEX
+AM_PROG_LEX([noyywrap])
 
 AC_PROG_YACC
 AC_PATH_PROG(AR, ar)
@@ -336,21 +393,21 @@ qt)
 
 	dnl Checks for Qt library.
 	AC_CACHE_CHECK([for Qt library],
-	  ac_qtlib, [
+	  ac_cv_qtlib, [
 	  for X in qt-mt qt; do
-	    if test -z "$ac_qtlib"; then
+	    if test -z "$ac_cv_qtlib"; then
 	      if test -f $QTDIR/lib/lib$X.so -o -f $QTDIR/lib/lib$X.a; then
-	        ac_qtlib=$X
+	        ac_cv_qtlib=$X
 	      fi
 	    fi
 	  done
 	])
-	if test -z "$ac_qtlib"; then
+	if test -z "$ac_cv_qtlib"; then
 	  AC_MSG_ERROR([Qt library not found. Maybe QTDIR isn't properly set.])
 	fi
 
 	dnl Check for Qt multi-thread support.
-	if test "x$ac_qtlib" = "xqt-mt"; then
+	if test "x$ac_cv_qtlib" = "xqt-mt"; then
 	  ac_thread="thread"
 	fi
 	AC_SUBST(ac_thread)
@@ -359,20 +416,20 @@ qt)
 	LIBS="-L$QTDIR/lib -L/usr/X11R6/lib"
 
 	AC_CACHE_CHECK(
-		[for Qt library version >= 3.0.0], ac_qtlib_version,
-		[	AC_TRY_LINK(
-			[
+		[for Qt library version >= 3.0.0], ac_cv_qtlib_version,
+		[	AC_LINK_IFELSE([AC_LANG_PROGRAM(
+			[[
 				#include "qglobal.h"
-			],
-			[
+			]],
+			[[
 				#if QT_VERSION < 0x030000
 				#error Qt library 3.0.0 or greater required.
 				#endif
-			],
+			]])],
 			[
-				ac_qtlib_version="yes"
+				ac_cv_qtlib_version="yes"
 				QT_CFLAGS="$CFLAGS"
-				QT_LIBS="-l$ac_qtlib"
+				QT_LIBS="-l$ac_cv_qtlib"
 				QT_LDFLAGS="$LIBS"
 			],
 			[
@@ -427,19 +484,18 @@ dnl Checks for some functions.
 AC_CHECK_FUNCS([gettimeofday memset setenv])
 
 AC_CHECK_FUNCS(log2, , AC_MSG_CHECKING(for log2 in math.h)
-	AC_TRY_LINK([#include <math.h>], 
-	[ log2(1.0); ], 
-	AC_DEFINE(HAVE_LOG2) AC_MSG_RESULT(yes),
-	AC_MSG_RESULT(no)))
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <math.h>]],
+	[[ log2(1.0); ]])],
+	[AC_DEFINE(HAVE_LOG2) AC_MSG_RESULT(yes)],
+	[AC_MSG_RESULT(no)]))
 
 AC_CHECK_FUNCS(exp2, , AC_MSG_CHECKING(for exp2 in math.h)
-	AC_TRY_LINK([#include <math.h>], 
-	[ exp2(0.0); ], 
-	AC_DEFINE(HAVE_EXP2) AC_MSG_RESULT(yes),
-	AC_MSG_RESULT(no)))
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <math.h>]],
+	[[ exp2(0.0); ]])],
+	[AC_DEFINE(HAVE_EXP2) AC_MSG_RESULT(yes)],
+	[AC_MSG_RESULT(no)]))
 
 dnl Checks for header files.
-AC_HEADER_STDC
 AC_CHECK_HEADERS(pthread.h, AC_DEFINE(PTHREAD_HDR, <pthread.h>, [Have pthread.h?]))
 AC_CHECK_HEADERS([sys/socket.h])
 AC_CHECK_HEADERS([asm/types.h])
@@ -504,7 +560,7 @@ AC_CHECK_SIZEOF(long long, 8)
 
 #AC_SUBST(PTHREAD_FLAGS)
 
-AC_OUTPUT([
+AC_CONFIG_FILES([
 Makefile
 doc/Makefile
 scripts/Makefile
@@ -549,6 +605,7 @@ src/system/ui/win32/Makefile
 src/system/ui/x11/Makefile
 src/tools/Makefile
 ])
+AC_OUTPUT
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([$0 successful.])

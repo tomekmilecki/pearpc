@@ -20,9 +20,11 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdint>
 
 #include "tools/debug.h"
 #include "tools/snprintf.h"
+#include "debug/tracers.h"
 #include "jitc.h"
 #include "jitc_asm.h"
 #include "jitc_debug.h"
@@ -1856,8 +1858,17 @@ void JITC::asmCALL(NativeAddress to)
 {
 	emitAssure(5);
 	byte instr[5];
+	sint64 disp = sint64(uintptr_t(to)) - sint64(uintptr_t(currentPage->tcp+5));
+	if (disp < -0x80000000LL || disp > 0x7fffffffLL) {
+		PPC_CPU_ERR("call rel32 out of range: target %p is %lld bytes from "
+			"the translation cache, beyond the +-2GB a signed 32-bit "
+			"displacement can encode. Native helpers must be reachable "
+			"from the translation cache; linking the executable non-PIE "
+			"(-no-pie) is the usual way to ensure this.\n",
+			to, (long long)disp);
+	}
 	instr[0] = 0xe8;
-	U32(instr + 1) = uint32(to - (currentPage->tcp+5));
+	U32(instr + 1) = uint32(disp);
 	emit(instr, 5);
 }
 
