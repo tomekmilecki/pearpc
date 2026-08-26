@@ -71,14 +71,7 @@ static uint8 scancode_to_adb_key[256] = {
 static bool handleSDLEvent(const SDL_Event &event)
 {
 	static bool mouseButton[3] = {false, false, false};
-	static int inputDebugCount = 0;
 	bool tmpMouseButton[3];
-	if (inputDebugCount < 10 &&
-	    (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-		fprintf(stderr, "[INPUT-DEBUG] SDL mouse type=%x button=%d down=%d\n", event.type, event.button.button,
-		        event.button.down);
-		++inputDebugCount;
-	}
 
 	SystemEvent ev;
 	switch (event.type) {

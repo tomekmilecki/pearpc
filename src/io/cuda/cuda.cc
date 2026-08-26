@@ -284,7 +284,6 @@ struct cuda_control {
 
 static cuda_control	gCUDA;
 static sys_mutex	gCUDAMutex;
-static int pmuCommandTraceCount;
 
 /* Command and response lengths used by PMU99. -1 means a length byte is
  * transferred before the payload. This is the table used by the Apple and
@@ -330,24 +329,12 @@ static void pmu_update_ext_interrupt()
     }
 }
 
-static int gTraceReq = 0;
-static int gTraceAck = 0;
-
 static int pmu_adb_request(uint8 command, const uint8 *payload, int payloadLength, uint8 *reply)
 {
     const int device = command >> 4;
     const int operation = command & 0x0c;
     const int reg = command & 3;
 
-    {
-        /* Temporary: what does the guest actually ask the ADB bus for? */
-        if (gTraceReq < 30) {
-            gTraceReq++;
-            fprintf(stderr, "[ADB-REQ] cmd=%02x dev=%d op=%s reg=%d\n", command, device,
-                    (command & 0x0c) == 0x0c ? "Talk" : (command & 0x0c) == 0x08 ? "Listen" : "other",
-                    command & 3);
-        }
-    }
     if ((command & 0x0f) == ADB_BUSRESET) {
         gCUDA.keybaddr = ADB_KEYBOARD;
         gCUDA.keybhandler = 1;
@@ -423,24 +410,6 @@ static void pmu_dispatch_command()
         break;
     case PMU_INT_ACK:
         if ((gCUDA.pmuInterruptBits & PMU_INT_ADB) && gCUDA.pmuAdbReplyLength) {
-            {
-                /* Trace only real autopoll device packets (mouse 0x3c / keyboard
-                 * 0x2c) -- ADB enumeration replies would otherwise use up the
-                 * budget before the first mouse movement.  Read back Mac OS's
-                 * RawMouse global (low memory 0x82c, at physical 0x482c) so the
-                 * whole path can be judged from one line. */
-                uint8 first = gCUDA.pmuAdbReply[0];
-                if ((first == 0x3c || first == 0x2c) && gTraceAck < 20) {
-                    gTraceAck++;
-                    uint8 raw[4] = {0,0,0,0};
-                    ppc_dma_read(raw, 0x482c, 4);
-                    fprintf(stderr, "[ADB-ACK] pkt:");
-                    for (int i = 0; i < gCUDA.pmuAdbReplyLength; i++)
-                        fprintf(stderr, " %02x", gCUDA.pmuAdbReply[i]);
-                    fprintf(stderr, "   RawMouse before = v=%d h=%d\n",
-                            (raw[0] << 8) | raw[1], (raw[2] << 8) | raw[3]);
-                }
-            }
             response[0] = gCUDA.pmuInterruptBits & (PMU_INT_ADB | PMU_INT_ADB_AUTO);
             memcpy(response + 1, gCUDA.pmuAdbReply, gCUDA.pmuAdbReplyLength);
             responseLength = gCUDA.pmuAdbReplyLength + 1;
@@ -454,16 +423,6 @@ static void pmu_dispatch_command()
         pmu_update_ext_interrupt();
         break;
     case PMU_ADB_CMD: {
-        {
-            static int c = 0;
-            if (c < 40) {
-                c++;
-                fprintf(stderr, "[PMU-ADBCMD] len=%d payload:", gCUDA.pmuCommandPosition);
-                for (int i = 0; i < gCUDA.pmuCommandPosition && i < 6; i++)
-                    fprintf(stderr, " %02x", request[i]);
-                fprintf(stderr, "\n");
-            }
-        }
         if (gCUDA.pmuCommandPosition >= 4 && request[0] == 0 && request[1] == 0x86) {
             gCUDA.autopoll = request[2] != 0 || request[3] != 0;
             break;
@@ -526,18 +485,6 @@ static void pmu_dispatch_command()
         responseLength = 0;
         break;
     default:
-        {
-            /* Temporary: which PMU commands does the guest use that we ignore? */
-            static uint8 seen[256] = {0};
-            if (!seen[gCUDA.pmuCommand]) {
-                seen[gCUDA.pmuCommand] = 1;
-                fprintf(stderr, "[PMU-UNHANDLED] cmd=%02x len=%d payload:", gCUDA.pmuCommand,
-                        gCUDA.pmuCommandPosition);
-                for (int i = 0; i < gCUDA.pmuCommandPosition && i < 6; i++)
-                    fprintf(stderr, " %02x", request[i]);
-                fprintf(stderr, "\n");
-            }
-        }
         if (gCUDA.pmuResponseLength > 0) {
             responseLength = MIN(gCUDA.pmuResponseLength, (int)sizeof gCUDA.pmuResponseData);
             memset(response, 0, responseLength);
@@ -549,16 +496,6 @@ static void pmu_dispatch_command()
     gCUDA.pmuResponseLength = responseLength;
     gCUDA.pmuResponsePosition = variableResponse ? -1 : 0;
     gCUDA.pmuState = (responseLength || variableResponse) ? pmu_response : pmu_idle;
-    if (pmuCommandTraceCount < 512) {
-        fprintf(stderr, "[PMU-CMD] n=%d cmd=%02x in=%d", pmuCommandTraceCount,
-                gCUDA.pmuCommand, gCUDA.pmuCommandPosition);
-        for (int i = 0; i < MIN(gCUDA.pmuCommandPosition, 8); ++i) {
-            fprintf(stderr, " %02x", request[i]);
-        }
-        fprintf(stderr, " out=%d bits=%02x mask=%02x adb=%d\n", responseLength,
-                gCUDA.pmuInterruptBits, gCUDA.pmuInterruptMask, gCUDA.pmuAdbReplyLength);
-        ++pmuCommandTraceCount;
-    }
 }
 
 static void pmu_transfer_byte()
@@ -1514,16 +1451,6 @@ static bool cudaEventHandler(const SystemEvent &ev)
 static bool doProcessCudaEvent(const SystemEvent &ev)
 {
 	if (gCUDA.pmuMode) {
-		static int inputDebugCount = 0;
-		if (inputDebugCount < 10) {
-			fprintf(stderr, "[INPUT-DEBUG] PMU event type=%d mouse=%d buttons=%d%d%d pending=%02x reply=%d\n",
-			        ev.type, ev.type == sysevMouse ? ev.mouse.type : -1,
-			        ev.type == sysevMouse ? ev.mouse.button1 : 0,
-			        ev.type == sysevMouse ? ev.mouse.button2 : 0,
-			        ev.type == sysevMouse ? ev.mouse.button3 : 0, gCUDA.pmuInterruptBits,
-			        gCUDA.pmuAdbReplyLength);
-			++inputDebugCount;
-		}
         if (ev.type == sysevMouse) {
             /* Accumulate first, so motion is never lost just because an earlier
              * reply is still outstanding -- the guest may be polling for it. */
@@ -1646,8 +1573,6 @@ static void *cudaEventLoop(void *arg)
 		sys_unlock_mutex(gCUDAMutex);
 		if (gDebugInjectMouseMotion) {
 			gDebugInjectMouseMotion = 0;
-			gTraceReq = 0;   /* capture what the guest does *after* injection */
-			gTraceAck = 0;
 			for (int i = 0; i < 20; i++) {
 				SystemEvent ev = {};
 				ev.type = sysevMouse;

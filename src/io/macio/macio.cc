@@ -56,8 +56,6 @@
 #define MACIO_GPIO_SIZE 0x30
 #define MACIO_PMU_EXTINT_GPIO 0x59
 
-static int macioGPIOTraceCount;
-
 /*
  * KeyLargo's global timer is a free-running 64-bit counter clocked at
  * 18.432 MHz.  Reading the low word latches the high word so software can
@@ -703,11 +701,6 @@ bool PCI_MacIO::readDeviceMem(uint r, uint32 address, uint32 &data, uint size)
     if (r == 0 && address >= MACIO_GPIO_BASE && address < MACIO_GPIO_BASE + MACIO_GPIO_SIZE &&
         cuda_is_pmu()) {
         data = address == MACIO_PMU_EXTINT_GPIO && !cuda_pmu_extint_asserted() ? 0x02 : 0;
-        if (macioGPIOTraceCount < 256) {
-            fprintf(stderr, "[GPIO-DEBUG] read size=%u address=%02x data=%02x asserted=%d\n",
-                    size, address, data, cuda_pmu_extint_asserted());
-            ++macioGPIOTraceCount;
-        }
         return true;
     }
 
@@ -766,11 +759,6 @@ bool PCI_MacIO::writeDeviceMem(uint r, uint32 address, uint32 data, uint size)
 
     if (r == 0 && address >= MACIO_GPIO_BASE && address < MACIO_GPIO_BASE + MACIO_GPIO_SIZE &&
         cuda_is_pmu()) {
-        if (macioGPIOTraceCount < 256) {
-            fprintf(stderr, "[GPIO-DEBUG] write size=%u address=%02x data=%02x asserted=%d\n",
-                    size, address, data, cuda_pmu_extint_asserted());
-            ++macioGPIOTraceCount;
-        }
         return true;
     }
 

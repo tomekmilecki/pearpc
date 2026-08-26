@@ -42,7 +42,6 @@ static uint32 OpenPIC_ctpr;
 static uint32 OpenPIC_spurious;
 static bool OpenPIC_active;
 static int OpenPIC_inService;
-static int pmuInterruptDebugCount;
 
 static void pic_renew_interrupts()
 {
@@ -103,11 +102,6 @@ static void openpic_write(uint32 addr, uint32 data, int size)
 		OpenPIC_spurious = data & 0xff;
 	} else if (reg >= 0x10000 && reg < 0x10800) {
 		int intr = (reg & 0xffff) >> 5;
-		if (intr == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
-			fprintf(stderr, "[PMU-IRQ-DEBUG] write reg=%x data=%08x ctpr=%u\n", reg & 0x1f, data,
-			        OpenPIC_ctpr);
-			++pmuInterruptDebugCount;
-		}
 		switch (reg & 0x1f) {
 		case 0x00:
 			OpenPIC_ivpr[intr] = data;
@@ -175,11 +169,6 @@ static void openpic_read(uint32 addr, uint32 &data, int size)
 			if (selected < 0) {
 				data = OpenPIC_spurious;
 			} else {
-				if (selected == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
-					fprintf(stderr, "[PMU-IRQ-DEBUG] iack ivpr=%08x idr=%08x pending=%08x\n",
-					        OpenPIC_ivpr[selected], OpenPIC_idr[selected], PIC_pending_high);
-					++pmuInterruptDebugCount;
-				}
 				data = OpenPIC_ivpr[selected] & 0xff;
 				OpenPIC_inService = selected;
 				if (!(OpenPIC_ivpr[selected] & 0x00400000) || selected == IO_PIC_IRQ_CUDA) {
@@ -317,11 +306,6 @@ void pic_raise_interrupt(int intr)
 		intr_ = intr;
 	}
 	uint32 ibit = 1 << intr_;
-	if (intr == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
-		fprintf(stderr, "[PMU-IRQ-DEBUG] raise active=%d ivpr=%08x ctpr=%u pending=%08x enable=%08x\n",
-		        OpenPIC_active, OpenPIC_ivpr[intr], OpenPIC_ctpr, PIC_pending_high, PIC_enable_high);
-		++pmuInterruptDebugCount;
-	}
 	bool level = false;
 	if (intr > 31) {
 		PIC_pending_high |= ibit;
