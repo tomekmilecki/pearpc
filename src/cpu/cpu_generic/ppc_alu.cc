@@ -45,10 +45,21 @@ void ppc_opc_addx()
 
 void ppc_opc_addox()
 {
-    SEM;
-    ppc_sem_addx(s, gCPU.current_opc);
-    // update XER flags
-    PPC_ALU_ERR("addox unimplemented\n");
+    int rD, rA, rB;
+    PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
+    uint32 a = gCPU.gpr[rA];
+    uint32 b = gCPU.gpr[rB];
+    uint32 result = a + b;
+    gCPU.gpr[rD] = result;
+    bool overflow = ((a ^ result) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        gCPU.xer |= XER_OV | XER_SO;
+    } else {
+        gCPU.xer &= ~XER_OV;
+    }
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(result);
+    }
 }
 
 void ppc_opc_addcx()
@@ -59,10 +70,22 @@ void ppc_opc_addcx()
 
 void ppc_opc_addcox()
 {
-    SEM;
-    ppc_sem_addcx(s, gCPU.current_opc);
-    // update XER flags
-    PPC_ALU_ERR("addcox unimplemented\n");
+    int rD, rA, rB;
+    PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
+    uint32 a = gCPU.gpr[rA];
+    uint32 b = gCPU.gpr[rB];
+    uint32 result = a + b;
+    gCPU.gpr[rD] = result;
+    gCPU.xer_ca = result < a;
+    bool overflow = ((a ^ result) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        gCPU.xer |= XER_OV | XER_SO;
+    } else {
+        gCPU.xer &= ~XER_OV;
+    }
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(result);
+    }
 }
 
 void ppc_opc_addex()
@@ -259,13 +282,18 @@ void ppc_opc_divwox()
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
-    if (!gCPU.gpr[rB]) {
-        PPC_ALU_ERR("division by zero\n");
+    sint32 dividend = (sint32)gCPU.gpr[rA];
+    sint32 divisor = (sint32)gCPU.gpr[rB];
+    bool overflow = divisor == 0 || (dividend == (sint32)0x80000000 && divisor == -1);
+    if (overflow) {
+        gCPU.xer |= XER_OV | XER_SO;
+    } else {
+        gCPU.gpr[rD] = dividend / divisor;
+        gCPU.xer &= ~XER_OV;
     }
-    SEM;
-    ppc_sem_divwx(s, gCPU.current_opc);
-    // update XER flags
-    PPC_ALU_ERR("divwox unimplemented\n");
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(gCPU.gpr[rD]);
+    }
 }
 
 void ppc_opc_divwux()
@@ -284,13 +312,16 @@ void ppc_opc_divwuox()
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
-    if (!gCPU.gpr[rB]) {
-        //		PPC_ALU_ERR("division by zero\n");
+    bool overflow = gCPU.gpr[rB] == 0;
+    if (overflow) {
+        gCPU.xer |= XER_OV | XER_SO;
+    } else {
+        gCPU.gpr[rD] = gCPU.gpr[rA] / gCPU.gpr[rB];
+        gCPU.xer &= ~XER_OV;
     }
-    SEM;
-    ppc_sem_divwux(s, gCPU.current_opc);
-    // update XER flags
-    PPC_ALU_ERR("divwuox unimplemented\n");
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(gCPU.gpr[rD]);
+    }
 }
 
 // ---- Equivalent ----
@@ -337,8 +368,22 @@ void ppc_opc_mulli()
 
 void ppc_opc_mullwx()
 {
-    SEM;
-    ppc_sem_mullwx(s, gCPU.current_opc);
+    int rD, rA, rB;
+    PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
+    sint64 product = (sint64)(sint32)gCPU.gpr[rA] * (sint64)(sint32)gCPU.gpr[rB];
+    uint32 result = (uint32)product;
+    gCPU.gpr[rD] = result;
+    if (gCPU.current_opc & PPC_OPC_OE) {
+        bool overflow = product != (sint64)(sint32)result;
+        if (overflow) {
+            gCPU.xer |= XER_OV | XER_SO;
+        } else {
+            gCPU.xer &= ~XER_OV;
+        }
+    }
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(result);
+    }
 }
 
 // ---- NAND ----
@@ -469,10 +514,22 @@ void ppc_opc_subfcx()
 
 void ppc_opc_subfcox()
 {
-    SEM;
-    ppc_sem_subfcx(s, gCPU.current_opc);
-    // update XER flags
-    PPC_ALU_ERR("subfcox unimplemented\n");
+    int rD, rA, rB;
+    PPC_OPC_TEMPL_XO(gCPU.current_opc, rD, rA, rB);
+    uint32 a = gCPU.gpr[rA];
+    uint32 b = gCPU.gpr[rB];
+    uint32 result = ~a + b + 1;
+    gCPU.gpr[rD] = result;
+    gCPU.xer_ca = ppc_carry_3(~a, b, 1);
+    bool overflow = ((b ^ a) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        gCPU.xer |= XER_OV | XER_SO;
+    } else {
+        gCPU.xer &= ~XER_OV;
+    }
+    if (gCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(result);
+    }
 }
 
 void ppc_opc_subfex()

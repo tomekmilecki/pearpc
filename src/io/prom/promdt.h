@@ -158,6 +158,13 @@ protected:
 	virtual PromInstance *		createInstance(const String &param);
 };
 
+class PromNodeOpen: public PromNode {
+public:
+                    PromNodeOpen(const char *name);
+protected:
+    virtual PromInstance *createInstance(const String &param);
+};
+
 
 class PromInstanceATY: public PromInstance {
 public:
@@ -223,6 +230,23 @@ public:
 					PromInstanceMemory(PromNode *type, const String &param);
 	
 	virtual	void			callMethod(const char *method, prom_args *pa);
+};
+
+class PromNodeNVRAM: public PromNode {
+public:
+                    PromNodeNVRAM(const char *name);
+protected:
+    virtual PromInstance *createInstance(const String &param);
+};
+
+class PromInstanceNVRAM: public PromInstance {
+    uint32 mPosition;
+public:
+                    PromInstanceNVRAM(PromNode *type, const String &param);
+    virtual uint32 read(uint32 buf, int length);
+    virtual uint32 write(uint32 buf, int length);
+    virtual uint32 seek(uint64 pos);
+    virtual void callMethod(const char *method, prom_args *pa);
 };
 
 class PromNodeDisk: public PromNode {

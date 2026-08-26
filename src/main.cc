@@ -252,6 +252,16 @@ static void crash_handler(int sig, siginfo_t *info, void *ctx)
     ppc_cpu_crash_dump(128 + sig);
 }
 
+static void input_test_handler(int)
+{
+    cuda_debug_inject_mouse_click();
+}
+
+static void motion_test_handler(int)
+{
+    cuda_debug_inject_mouse_motion();
+}
+
 int main(int argc, char *argv[])
 {
     // Install signal handlers for crash diagnostics
@@ -262,6 +272,9 @@ int main(int argc, char *argv[])
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+
+    signal(SIGUSR1, input_test_handler);
+    signal(SIGUSR2, motion_test_handler);
 
     const char *configfile = NULL;
     bool showHelp = false;

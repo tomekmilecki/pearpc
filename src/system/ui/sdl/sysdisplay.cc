@@ -59,6 +59,10 @@ uint SDLSystemDisplay::bitsPerPixelToXBitmapPad(uint bitsPerPixel)
 
 #define MASK(shift, size) (((1 << (size))-1)<<(shift))
 
+// The guest sees a 16 MiB PCI framebuffer aperture and probes beyond the
+// currently visible mode while detecting VRAM. Keep the full aperture backed.
+static const size_t kEmulatedFramebufferSize = 16 * 1024 * 1024;
+
 void SDLSystemDisplay::dumpDisplayChar(const DisplayCharacteristics &chr)
 {
 	fprintf(stderr, "\tdimensions:          %d x %d pixels\n", chr.width, chr.height);
@@ -75,10 +79,8 @@ SDLSystemDisplay::SDLSystemDisplay(const char *title, const DisplayCharacteristi
 {
 	mTitle = strdup(title);
 
-	gFrameBuffer = (byte*)malloc(mClientChar.width *
-		mClientChar.height * mClientChar.bytesPerPixel);
-	memset(gFrameBuffer, 0, mClientChar.width *
-		mClientChar.height * mClientChar.bytesPerPixel);
+	gFrameBuffer = (byte*)malloc(kEmulatedFramebufferSize);
+	memset(gFrameBuffer, 0, kEmulatedFramebufferSize);
 	damageFrameBufferAll();
 
 	mSDLFrameBuffer = NULL;
@@ -114,36 +116,18 @@ void SDLSystemDisplay::displayShow()
 
 	sys_lock_mutex(mRedrawMutex);
 
-	// Update texture if framebuffer has been damaged.
-	// We've got problems with races here because gcard_write1/2/4
-	// might set gDamageAreaFirstAddr, gDamageAreaLastAddr.
-	// We can't use mutexes in gcard for speed reasons. So we'll
-	// try to minimize the probability of loosing the race.
-	if (gDamageAreaFirstAddr <= gDamageAreaLastAddr+3 && mSDLFrameBuffer) {
-		int damageAreaFirstAddr = gDamageAreaFirstAddr;
-		int damageAreaLastAddr = gDamageAreaLastAddr;
+	/*
+	 * The framebuffer is written by the CPU thread while SDL runs on the
+	 * main thread.  The legacy min/max damage markers are not synchronized,
+	 * so relying on them can permanently miss a completed burst of guest
+	 * drawing.  SDL3 textures are already presented every redraw; upload the
+	 * complete visible surface as well so the window always reflects VRAM.
+	 */
+	if (mSDLFrameBuffer) {
 		healFrameBuffer();
-		// end of race
-		damageAreaLastAddr += 3;	// this is a hack. For speed reasons we
-						// inaccurately set gDamageAreaLastAddr
-						// to the first (not last) byte accessed
-						// accesses are up to 4 bytes "long".
-		int firstDamagedLine = damageAreaFirstAddr / (mClientChar.width * mClientChar.bytesPerPixel);
-		int lastDamagedLine = damageAreaLastAddr / (mClientChar.width * mClientChar.bytesPerPixel);
-		if (lastDamagedLine >= mClientChar.height) {
-			lastDamagedLine = mClientChar.height-1;
-		}
-
 		sys_convert_display(mClientChar, mSDLChar, gFrameBuffer,
-			mSDLFrameBuffer, firstDamagedLine, lastDamagedLine);
-
-		SDL_Rect updateRect;
-		updateRect.x = 0;
-		updateRect.y = firstDamagedLine;
-		updateRect.w = mClientChar.width;
-		updateRect.h = lastDamagedLine - firstDamagedLine + 1;
-		SDL_UpdateTexture(gSDLTexture, &updateRect,
-			mSDLFrameBuffer + firstDamagedLine * mClientChar.width * mSDLChar.bytesPerPixel,
+			mSDLFrameBuffer, 0, mClientChar.height - 1);
+		SDL_UpdateTexture(gSDLTexture, NULL, mSDLFrameBuffer,
 			mClientChar.width * mSDLChar.bytesPerPixel);
 	}
 
@@ -236,6 +220,8 @@ bool SDLSystemDisplay::changeResolutionREAL(const DisplayCharacteristics &aChara
 			exit(1);
 		}
 		SDL_SetRenderDrawColor(gSDLRenderer, 0, 0, 0, 255);
+		SDL_ShowWindow(gSDLWindow);
+		SDL_RaiseWindow(gSDLWindow);
 	} else {
 		SDL_SetWindowSize(gSDLWindow, aCharacteristics.width, aCharacteristics.height);
 		if (mFullscreen) {
@@ -281,8 +267,7 @@ bool SDLSystemDisplay::changeResolutionREAL(const DisplayCharacteristics &aChara
 
 	mFullscreenChanged = mFullscreen;
 
-	gFrameBuffer = (byte*)realloc(gFrameBuffer, mClientChar.width *
-		mClientChar.height * mClientChar.bytesPerPixel);
+	gFrameBuffer = (byte*)realloc(gFrameBuffer, kEmulatedFramebufferSize);
 
 	// Allocate host framebuffer for pixel format conversion
 	free(mSDLFrameBuffer);
@@ -328,7 +313,15 @@ void SDLSystemDisplay::setMouseGrab(bool enable)
 		if (enable) {
 			SDL_SetCursor(mInvisibleCursor);
 			SDL_SetWindowMouseGrab(gSDLWindow, true);
+			/*
+			 * Confining the cursor is not enough: the guest is driven by
+			 * relative deltas, and a merely-confined cursor stops producing
+			 * them as soon as it reaches a window edge, which strands the
+			 * guest pointer.  Relative mode keeps deltas flowing regardless.
+			 */
+			SDL_SetWindowRelativeMouseMode(gSDLWindow, true);
 		} else {
+			SDL_SetWindowRelativeMouseMode(gSDLWindow, false);
 			SDL_SetCursor(mVisibleCursor);
 			SDL_SetWindowMouseGrab(gSDLWindow, false);
 		}

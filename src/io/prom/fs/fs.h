@@ -31,6 +31,7 @@ public:
 			FileSystem(File *device);
 	/* new */
 	virtual	File *	open(const String &filename) = 0;
+	virtual	File *	openBootFile() = 0;
 	virtual	bool	getBlessedPath(String &blessed) = 0;
 };
 

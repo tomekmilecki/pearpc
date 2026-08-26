@@ -38,8 +38,12 @@
 
 static void ppc_opc_special()
 {
-	if (gCPU.pc == gPromOSIEntry && gCPU.current_opc == PROM_MAGIC_OPCODE) {
+	if (prom_osi_is_entry(gCPU.pc) && gCPU.current_opc == PROM_MAGIC_OPCODE) {
 		call_prom_osi();
+		return;
+	}
+	if (prom_rtas_is_entry(gCPU.pc) && gCPU.current_opc == PROM_RTAS_MAGIC_OPCODE) {
+		call_prom_rtas();
 		return;
 	}
 	if (gCPU.current_opc == 0x00333301) {
@@ -166,6 +170,8 @@ static void ppc_opc_init_group2()
 	ppc_opc_table_group2[4] = ppc_opc_tw;
 	ppc_opc_table_group2[8] = ppc_opc_subfcx;//+
 	ppc_opc_table_group2[10] = ppc_opc_addcx;//+
+	ppc_opc_table_group2[520] = ppc_opc_subfcox;
+	ppc_opc_table_group2[522] = ppc_opc_addcox;
 	ppc_opc_table_group2[11] = ppc_opc_mulhwux;
 	ppc_opc_table_group2[19] = ppc_opc_mfcr;
 	ppc_opc_table_group2[20] = ppc_opc_lwarx;
@@ -244,8 +250,10 @@ static void ppc_opc_init_group2()
 	ppc_opc_table_group2[695] = ppc_opc_stfsux;
 	ppc_opc_table_group2[725] = ppc_opc_stswi;
 	ppc_opc_table_group2[727] = ppc_opc_stfdx;
+	ppc_opc_table_group2[747] = ppc_opc_mullwx;
 	ppc_opc_table_group2[758] = ppc_opc_dcba;
 	ppc_opc_table_group2[759] = ppc_opc_stfdux;
+	ppc_opc_table_group2[778] = ppc_opc_addox;
 	ppc_opc_table_group2[790] = ppc_opc_lhbrx;
 	ppc_opc_table_group2[792] = ppc_opc_srawx;
 	ppc_opc_table_group2[824] = ppc_opc_srawix;
@@ -253,8 +261,10 @@ static void ppc_opc_init_group2()
 	ppc_opc_table_group2[918] = ppc_opc_sthbrx;
 	ppc_opc_table_group2[922] = ppc_opc_extshx;
 	ppc_opc_table_group2[954] = ppc_opc_extsbx;
+	ppc_opc_table_group2[971] = ppc_opc_divwuox;
 	ppc_opc_table_group2[982] = ppc_opc_icbi;
 	ppc_opc_table_group2[983] = ppc_opc_stfiwx;
+	ppc_opc_table_group2[1003] = ppc_opc_divwox;
 	ppc_opc_table_group2[1014] = ppc_opc_dcbz;
 
 	if ((ppc_cpu_get_pvr(0) & 0xffff0000) == 0x000c0000) {

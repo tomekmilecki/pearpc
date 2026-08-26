@@ -229,25 +229,16 @@ void gcard_raise_interrupt()
 
 void gcard_osi(int cpu)
 {
-	static int osi29count = 0;
 	uint32 func = ppc_cpu_get_gpr(cpu, 5);
-	if (func != 29 && func != 47) {
-		fprintf(stderr, "[GCARD] osi call: %d r6=%08x r7=%08x r8=%08x\n",
-			func, ppc_cpu_get_gpr(cpu, 6), ppc_cpu_get_gpr(cpu, 7), ppc_cpu_get_gpr(cpu, 8));
-	}
 	switch (func) {
 	case 4:
 		// cmount
-		fprintf(stderr, "[GCARD] cmount: gCurrentGraphicMode=%d totalModes=%d\n",
-			gCurrentGraphicMode, gGraphicModes ? (int)gGraphicModes->count() : -1);
 		return;
 	case 28: {
 		// set_vmode
 		uint vmode = ppc_cpu_get_gpr(cpu, 6)-1;
-		fprintf(stderr, "[GCARD] set_vmode: vmode=%d depth=%d\n", vmode, ppc_cpu_get_gpr(cpu, 7));
 		if (vmode > gGraphicModes->count() || ppc_cpu_get_gpr(cpu, 7)) {
 			ppc_cpu_set_gpr(cpu, 3, 1);
-			fprintf(stderr, "[GCARD] set_vmode: FAILED (out of range or depth!=0)\n");
 			return;
 		}
 		DisplayCharacteristics *chr = (DisplayCharacteristics *)(*gGraphicModes)[vmode];
@@ -255,28 +246,19 @@ void gcard_osi(int cpu)
 		if (gDisplay->changeResolution(*chr)) {
 			ppc_cpu_set_gpr(cpu, 3, 0);
 			gcard_set_mode(*chr);
-			fprintf(stderr, "[GCARD] set_vmode: OK %dx%dx%d\n", chr->width, chr->height, chr->bytesPerPixel*8);
 		} else {
 			ppc_cpu_set_gpr(cpu, 3, 1);
-			fprintf(stderr, "[GCARD] set_vmode: FAILED (changeResolution)\n");
 		}
 		return;
 	}
 	case 29: {
 		// get_vmode_info
 		int vmode = ppc_cpu_get_gpr(cpu, 6) - 1;
-		int depth_mode = ppc_cpu_get_gpr(cpu, 7);
-		int orig_vmode = vmode;
 		if (vmode == -1) {
 			vmode = gCurrentGraphicMode;
-			depth_mode = ((DisplayCharacteristics *)(*gGraphicModes)[vmode])->bytesPerPixel*8;
 		}
 		if (vmode > (int)gGraphicModes->count() || vmode < 0) {
 			ppc_cpu_set_gpr(cpu, 3, 1);
-			if (osi29count < 100)
-				fprintf(stderr, "[GCARD] get_vmode_info[%d]: vmode=%d(req=%d) → FAIL (out of range, count=%d)\n",
-					osi29count, vmode, orig_vmode, (int)gGraphicModes->count());
-			osi29count++;
 			return;
 		}
 		DisplayCharacteristics *chr = ((DisplayCharacteristics *)(*gGraphicModes)[vmode]);
@@ -287,14 +269,6 @@ void gcard_osi(int cpu)
 		ppc_cpu_set_gpr(cpu, 7, chr->vsyncFrequency << 16);
 		ppc_cpu_set_gpr(cpu, 8, chr->bytesPerPixel*8);
 		ppc_cpu_set_gpr(cpu, 9, ((chr->scanLineLength)<<16) | 0);
-		if (osi29count < 100)
-			fprintf(stderr, "[GCARD] get_vmode_info[%d]: vmode=%d(req=%d) depth_mode=%d → %dx%dx%d scanline=%d nmodes=%d\n",
-				osi29count, vmode, orig_vmode, depth_mode,
-				chr->width, chr->height, chr->bytesPerPixel*8, chr->scanLineLength,
-				(int)gGraphicModes->count());
-		else if (osi29count == 100)
-			fprintf(stderr, "[GCARD] get_vmode_info: suppressing further traces (100 reached)\n");
-		osi29count++;
 		return;
 	}
 	case 31:

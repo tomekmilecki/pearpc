@@ -178,6 +178,11 @@ do_export EXTERN(ppc_new_pc_this_page_asm)
     // directly from the ClientPage array, and jump to it.
     // Falls back to jitcNewPC if entrypoint not found.
 
+    // Same-page branches bypass ppc_new_pc_asm, so they must perform the
+    // heartbeat here as well. Otherwise a tight loop within one page never
+    // observes timer or device interrupts.
+    bl      EXTERN(ppc_heartbeat_ext_rel_asm)
+
     // Save offset for later
     mov     w21, w0
 
@@ -381,16 +386,10 @@ ppc_stop_jitc_asm:
     // Invalidate TLB
     mov x0, x20
     bl  EXTERN(ppc_mmu_tlb_invalidate_all_asm)
-    // Load JITC pointer
-    ldr x19, [x20, #jitc]
-    // Jump to exception vector
+    // Route exception entry through the normal dispatcher so pc and
+    // current_code_base are established for the vector page.
     mov w0, #\entry
-    mov w1, #0
-    bl  EXTERN(ppc_effective_to_physical_code)
-    mov w1, w0
-    mov x0, x19
-    bl  EXTERN(jitcNewPC)
-    br  x0
+    b   EXTERN(ppc_new_pc_asm)
 .endm
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -443,17 +442,8 @@ do_export EXTERN(ppc_ext_exception_asm)
     movk    w16, #0x87c0, lsl #16
     and w3, w3, w16
     str w3, [x20, #srr1]
-    // Atomically clear ext_exception and exception_pending.
-    // Preserve dec_exception if it was raised concurrently.
-    add     x1, x20, #exception_pending
-1:
-    ldxr    w2, [x1]
-    tst     w2, #0x00000100     // dec_exception
-    mov     w3, #0
-    cset    w3, ne
-    orr     w3, w3, w3, lsl #8  // if dec: 0x00000101, else 0x00000000
-    stlxr   w4, w3, [x1]
-    cbnz    w4, 1b
+    // ext_exception models the CPU's level-sensitive interrupt input. Leave
+    // it asserted until the interrupt controller explicitly deasserts it.
     exception_epilogue 0x500
 
 //////////////////////////////////////////////////////////////////////////////////////////////

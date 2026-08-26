@@ -82,6 +82,7 @@ struct malloc_entry {
 
 static uint32 gPromMemFreeBlock;
 static uint32 gPromMemLastBlock;
+static uint32 gPromNextVirtual;
 
 bool prom_claim_page(uint32 phys)
 {
@@ -127,35 +128,62 @@ uint32 prom_get_free_page()
 	return 0;
 }
 
+void prom_map_free_identity_pages(uint32 end)
+{
+	if (end > gPromMemStart) end = gPromMemStart;
+	for (uint32 phys = 0; phys < end; phys += 4096) {
+		if (!(gPhysMemoryUsed[phys / 4096 / 8] & (1 << ((phys / 4096) & 7)))) {
+			ppc_prom_page_create(phys, phys);
+		}
+	}
+}
+
+void prom_map_identity_range(uint32 start, uint32 size)
+{
+	uint32 end = start + size;
+	for (uint32 phys = start; phys < end; phys += 4096) {
+		ppc_prom_page_create(phys, phys);
+	}
+}
+
 uint32 prom_allocate_virt(uint32 size, uint32 align)
 {
-	return 0;
+	if (!align) align = 4096;
+	if (align < 4096) align = 4096;
+
+	uint32 pages = (size + 4095) / 4096;
+	uint32 bytes = pages * 4096;
+	if (!gPromNextVirtual) gPromNextVirtual = gMemorySize - PROM_MEM_SIZE;
+	if (gPromNextVirtual < bytes) return (uint32)-1;
+
+	uint32 ret = (gPromNextVirtual - bytes) & ~(align - 1);
+	if (ret + bytes > gPromNextVirtual) return (uint32)-1;
+	gPromNextVirtual = ret;
+	return ret;
 }
 
 uint32 prom_allocate_mem(uint32 size, uint32 align, uint32 virt)
 {
 	uint32 ret;
 	if (virt == 0) {
-		ret = prom_mem_malloc(size+align-1);
-		if (ret % align) {
-			ret += align - (ret % align);
-		}
+		ret = prom_allocate_virt(size, align);
+		if (ret == (uint32)-1) return ret;
+		virt = ret;
 	} else {
-		int pages = (size / 4096) + ((size % 4096)?1:0);
 		ret = virt;
-		for (int i=0; i<pages; i++) {
-			// test if phys==virtual mapping possible
-			if ((virt >= gMemorySize) ||
-			    (gPhysMemoryUsed[virt/4096/8] & (1 << ((virt/4096) & 7)))) {
-				uint32 pa = prom_get_free_page();
-				if (!pa) return (uint32) -1;
-				ppc_prom_page_create(virt, pa);
-			} else {
-				prom_claim_page(virt);
-				ppc_prom_page_create(virt, virt);
-			}
-			virt+=4096;
+	}
+
+	int pages = (size / 4096) + ((size % 4096)?1:0);
+	for (int i=0; i<pages; i++) {
+		// Test if an identity mapping is possible for a requested address.
+		if ((virt >= gMemorySize) ||
+		    (gPhysMemoryUsed[virt/4096/8] & (1 << ((virt/4096) & 7)))) {
+			uint32 pa = prom_get_free_page();
+			if (!pa || !ppc_prom_page_create(virt, pa)) return (uint32)-1;
+		} else {
+			if (!prom_claim_page(virt) || !ppc_prom_page_create(virt, virt)) return (uint32)-1;
 		}
+		virt += 4096;
 	}
 	return ret;
 }
@@ -337,6 +365,14 @@ bool prom_mem_init()
 	gPromOSIEntry = prom_mem_malloc(sizeof magic_opcode);
 	ppc_dma_write(gPromOSIEntry, &magic_opcode, sizeof magic_opcode);
 	gPromOSIEntry = prom_mem_phys_to_virt(gPromOSIEntry);
+
+	uint8 rtas_magic_opcode[] = {
+		DW(PROM_RTAS_MAGIC_OPCODE)
+		DW(0x4e800020)	// blr
+	};
+	gPromRTASEntry = prom_mem_malloc(sizeof rtas_magic_opcode);
+	ppc_dma_write(gPromRTASEntry, &rtas_magic_opcode, sizeof rtas_magic_opcode);
+	gPromRTASEntry = prom_mem_phys_to_virt(gPromRTASEntry);
 	return true;
 }
 

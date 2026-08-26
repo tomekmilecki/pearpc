@@ -28,6 +28,10 @@
 #define NVRAM_FREE_PARTITION_NAME "wwwwwwwwwwww"
 #define NVRAM_FREE_PARTITION_MAGIC 0x7f
 #define NVRAM_PARTITION_HDR_SIZE 16
+#define NVRAM_SYSTEM_PARTITION_MAGIC 0x70
+#define NVRAM_VENDOR_PARTITION_MAGIC 0x7e
+#define NVRAM_COMMON_PARTITION_SIZE 0x0800
+#define NVRAM_MACOS_PARTITION_SIZE 0x0800
 
 struct NVRAM {
 	FILE *f;
@@ -83,6 +87,30 @@ static uint8 calcChksum(byte *buf)
 	return y;
 }
 
+static void nvram_add_partition(byte *buf, uint32 offset, uint32 length, const char *name, uint8 magic)
+{
+    byte *header = buf + offset;
+    header[0] = magic;
+    header[2] = length >> 12;
+    header[3] = (length >> 4) & 0xff;
+    strncpy((char *)&header[4], name, 12);
+    header[1] = calcChksum(header);
+}
+
+static void nvram_create_default_image(byte *buf)
+{
+    memset(buf, 0, NVRAM_IMAGE_SIZE);
+
+    // New World Macs store Open Firmware variables and PRAM/XPRAM in named
+    // CHRP partitions. Classic Mac OS requires the APL,MacOS75 partition.
+    nvram_add_partition(buf, 0, NVRAM_COMMON_PARTITION_SIZE, "common", NVRAM_SYSTEM_PARTITION_MAGIC);
+    nvram_add_partition(buf, NVRAM_COMMON_PARTITION_SIZE, NVRAM_MACOS_PARTITION_SIZE, "APL,MacOS75",
+        NVRAM_VENDOR_PARTITION_MAGIC);
+    nvram_add_partition(buf, NVRAM_COMMON_PARTITION_SIZE + NVRAM_MACOS_PARTITION_SIZE,
+        NVRAM_IMAGE_SIZE - NVRAM_COMMON_PARTITION_SIZE - NVRAM_MACOS_PARTITION_SIZE,
+        NVRAM_FREE_PARTITION_NAME, NVRAM_FREE_PARTITION_MAGIC);
+}
+
 #define NRAM_KEY_FILE	"nvram_file"
 #include "configparser.h"
 
@@ -96,15 +124,7 @@ void nvram_init()
 		gNVRAM.f = fopen(filename.contentChar(), "wb+");
 		if (!gNVRAM.f) IO_NVRAM_ERR("couldn't create file '%y'\n", &filename);
 		byte buf[NVRAM_IMAGE_SIZE];
-		memset(buf, 0, sizeof buf);
-		
-		// Mark nvram as free:
-		buf[0] = NVRAM_FREE_PARTITION_MAGIC;
-		buf[1] = 0;	// Checksum
-		buf[2] = 0x02;	// Length/0x10 (MSB) 
-		buf[3] = 0x00;	// Length/0x10 (LSB)
-		memcpy(&buf[4], NVRAM_FREE_PARTITION_NAME, 12);
-		buf[1] = calcChksum(buf);
+        nvram_create_default_image(buf);
 		
 		if (fwrite(buf, sizeof buf, 1, gNVRAM.f) != 1) IO_NVRAM_ERR("can't write file '%y'\n", &filename);
 		fflush(gNVRAM.f);
@@ -120,4 +140,3 @@ void nvram_done()
 {
 	fclose(gNVRAM.f);
 }
-

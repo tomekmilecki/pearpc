@@ -36,6 +36,9 @@ void cuda_done();
 void cuda_init_config();
 
 bool cuda_prom_get_key(uint32 &key);
+bool cuda_is_pmu();
+bool cuda_pmu_extint_asserted();
+void cuda_debug_inject_mouse_click();
+void cuda_debug_inject_mouse_motion();
 
 #endif
-

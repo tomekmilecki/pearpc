@@ -2093,4 +2093,3 @@ void ide_init_config()
 	gConfig->acceptConfigEntryString(IDE_KEY_IDE0_SLAVE_TYPE, false);
 	gConfig->acceptConfigEntryString(IDE_KEY_IDE0_SLAVE_IMG, false);
 }
-

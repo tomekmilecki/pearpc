@@ -24,6 +24,8 @@
 #include "tools/snprintf.h"
 #include "debug/tracers.h"
 #include "io/prom/prom.h"
+#include "io/prom/prommem.h"
+#include "io/prom/promosi.h"
 #include "io/io.h"
 #include "ppc_cpu.h"
 #include "ppc_fpu.h"
@@ -68,6 +70,10 @@ int FASTCALL ppc_effective_to_physical(uint32 addr, int flags, uint32 &result)
 {
 	if (flags & PPC_MMU_CODE) {
 		if (!(gCPU.msr & MSR_IR)) {
+			if (addr == PROM_REAL_MODE_ENTRY && gPromOSIEntry) {
+				result = prom_mem_virt_to_phys(gPromOSIEntry);
+				return PPC_MMU_OK;
+			}
 			result = addr;
 			return PPC_MMU_OK;
 		}

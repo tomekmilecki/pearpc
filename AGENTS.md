@@ -67,6 +67,10 @@ See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for a detailed description of the
 
 See [doc/AGENT_DEBUGGING.md](doc/AGENT_DEBUGGING.md) for the full debugging methodology, including how to diagnose JIT kernel boot issues, what tools to use, and common pitfalls.
 
+For the Mac OS 9.2 / Power Mac G4 Cube boot effort specifically -- how to run the disk image, how to
+verify progress from the guest framebuffer, the fixes already applied, and the two outstanding
+blockers -- see [doc/MACOS9_BOOT.md](doc/MACOS9_BOOT.md).
+
 ## Code Style
 
 The existing codebase uses tabs for indentation. **New code should use spaces** (4 per indent level). A `.clang-format` file is provided to enforce this.

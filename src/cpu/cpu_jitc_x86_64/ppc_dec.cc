@@ -70,8 +70,12 @@ static JITCFlow ppc_opc_gen_invalid(JITC &jitc)
 
 static void ppc_opc_special(PPC_CPU_State &aCPU)
 {
-	if (aCPU.pc == gPromOSIEntry && aCPU.current_opc == PROM_MAGIC_OPCODE) {
+	if (prom_osi_is_entry(aCPU.pc) && aCPU.current_opc == PROM_MAGIC_OPCODE) {
 		call_prom_osi();
+		return;
+	}
+	if (prom_rtas_is_entry(aCPU.pc) && aCPU.current_opc == PROM_RTAS_MAGIC_OPCODE) {
+		call_prom_rtas();
 		return;
 	}
 	if (aCPU.current_opc == 0x00333301) {

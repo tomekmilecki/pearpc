@@ -131,7 +131,9 @@ do_export EXTERN(ppc_read_effective_byte_asm)
     str     w16, [x20, #pc]
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_read_effective_byte_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     // Load result from cpu->temp
@@ -175,7 +177,9 @@ do_export EXTERN(ppc_read_effective_half_z_asm)
     str     w16, [x20, #pc]
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_read_effective_half_z_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldr     w0, [x20, #temp]
@@ -219,7 +223,9 @@ do_export EXTERN(ppc_read_effective_half_s_asm)
     str     w16, [x20, #pc]
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_read_effective_half_z_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldr     w0, [x20, #temp]
@@ -263,7 +269,9 @@ do_export EXTERN(ppc_read_effective_word_asm)
     str     w16, [x20, #pc]
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_read_effective_word_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldr     w0, [x20, #temp]
@@ -306,7 +314,9 @@ do_export EXTERN(ppc_read_effective_dword_asm)
     str     w16, [x20, #pc]
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_read_effective_dword_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     // Load 64-bit result from cpu->temp (hi32) and cpu->temp2 (lo32)
@@ -349,7 +359,9 @@ do_export EXTERN(ppc_write_effective_byte_asm)
     mov     w2, w1                      // w2 = data
     mov     w1, w0                      // w1 = ea
     mov     x0, x20                     // x0 = cpu
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_write_effective_byte_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldp     x29, x30, [sp], #16
@@ -391,7 +403,9 @@ do_export EXTERN(ppc_write_effective_half_asm)
     mov     w2, w1
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_write_effective_half_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldp     x29, x30, [sp], #16
@@ -433,7 +447,9 @@ do_export EXTERN(ppc_write_effective_word_asm)
     mov     w2, w1
     mov     w1, w0
     mov     x0, x20
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_write_effective_word_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldp     x29, x30, [sp], #16
@@ -475,7 +491,9 @@ do_export EXTERN(ppc_write_effective_dword_asm)
     mov     x2, x1                      // x2 = data (64-bit)
     mov     w1, w0                      // w1 = ea
     mov     x0, x20                     // x0 = cpu
+    str     x6, [sp, #-16]!
     bl      EXTERN(ppc_write_effective_dword_slow)
+    ldr     x6, [sp], #16
     // Check return value: w0 != 0 means DSI
     cbnz    w0, .Ldsi_from_slow
     ldp     x29, x30, [sp], #16

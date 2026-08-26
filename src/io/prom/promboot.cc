@@ -19,6 +19,7 @@
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #include <cstring>
+#include <cstdlib>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -334,8 +335,8 @@ struct ELF_PROGRAM_HEADER32 {
 };
 
 struct ELF_NHEADER32 {
-	uint32 n_descsz;
 	uint32 n_namesz;
+	uint32 n_descsz;
 	uint32 n_type;
 };
 
@@ -480,6 +481,76 @@ bool promboot_copy_file_to_memory(File &f, uint32 &paddr, uint32 &vaddr, sint32 
 
 extern uint32 gMemorySize;
 
+struct NewWorldBootInfo {
+    uint32 elfOffset;
+    uint32 parcelsOffset;
+    uint32 parcelsSize;
+};
+
+static bool parse_bootinfo_constant(const char *script, const char *name, uint32 &value)
+{
+    const char *constant = strstr(script, name);
+    if (!constant) return false;
+
+    const char *hex = constant;
+    while (hex > script && strncmp(hex, "h# ", 3) != 0) hex--;
+    if (strncmp(hex, "h# ", 3) != 0) return false;
+
+    char *end;
+    unsigned long parsed = strtoul(hex + 3, &end, 16);
+    if (end == hex + 3 || parsed > 0xffffffffUL) return false;
+    value = parsed;
+    return true;
+}
+
+static bool parse_newworld_bootinfo(const char *script, NewWorldBootInfo &bootinfo)
+{
+    return parse_bootinfo_constant(script, "elf-offset", bootinfo.elfOffset)
+        && parse_bootinfo_constant(script, "parcels-offset", bootinfo.parcelsOffset)
+        && parse_bootinfo_constant(script, "parcels-size", bootinfo.parcelsSize);
+}
+
+static bool load_newworld_parcels(File &file, uint32 infoOffset, const NewWorldBootInfo &bootinfo)
+{
+    const uint32 romAddress = 0x00400000;
+    const uint32 pageSize = PPC_PAGE_SIZE;
+    const uint32 romSize = (bootinfo.parcelsSize + pageSize - 1) & ~(pageSize - 1);
+    if (!bootinfo.parcelsSize || romAddress + romSize > gMemorySize) return false;
+
+    if (!prom_claim_pages(romAddress, romSize)) {
+        IO_PROM_ERR("NewWorld bootinfo: cannot reserve toolbox parcels at %08x\n", romAddress);
+        return false;
+    }
+    uint32 romVirtual = prom_allocate_virt(romSize, pageSize);
+    if (romVirtual == (uint32)-1) return false;
+    for (uint32 offset = 0; offset < romSize; offset += pageSize) {
+        if (!ppc_prom_page_create(romVirtual + offset, romAddress + offset)) return false;
+    }
+
+    byte page[PPC_PAGE_SIZE];
+    file.seek(infoOffset + bootinfo.parcelsOffset);
+    uint32 remaining = bootinfo.parcelsSize;
+    uint32 address = romAddress;
+    while (remaining) {
+        uint32 count = MIN(remaining, pageSize);
+        if (file.read(page, count) != count || !ppc_dma_write(address, page, count)) return false;
+        remaining -= count;
+        address += count;
+    }
+
+    PromNode *macos = findDevice("/rom/macos", FIND_DEVICE_FIND, NULL);
+    if (!macos) return false;
+    byte property[] = {
+        byte(romVirtual >> 24), byte(romVirtual >> 16), byte(romVirtual >> 8), byte(romVirtual),
+        byte(bootinfo.parcelsSize >> 24), byte(bootinfo.parcelsSize >> 16),
+        byte(bootinfo.parcelsSize >> 8), byte(bootinfo.parcelsSize)
+    };
+    macos->addProp(new PromPropMemory("AAPL,toolbox-parcels", property, sizeof property));
+    IO_PROM_TRACE("NewWorld bootinfo: toolbox parcels at %08x (physical %08x), size %08x\n",
+        romVirtual, romAddress, bootinfo.parcelsSize);
+    return true;
+}
+
 /* Based on those standards from:
  * PowerPC Microprocessor Common Hardware Reference Platform (CHRP)
  *   System binding to: IEEE Std 1275-1994
@@ -488,7 +559,7 @@ extern uint32 gMemorySize;
  *   Revision: 1.8 [Approved Version]
  *   Date: Feburary 2, 1998
  */
-bool mapped_load_elf_from_chrp(File &f, uint disp_off)
+static bool mapped_load_elf_from_chrp(File &f, uint disp_off, const NewWorldBootInfo *bootinfo)
 {
 	String fn;
 	PROMBOOT_OUTPUT("ELF: trying to load '%y'\n", &f.getDesc(fn));
@@ -605,17 +676,28 @@ bool mapped_load_elf_from_chrp(File &f, uint disp_off)
 			}
 		}
 
-		PROMBOOT_OUTPUT("ELF: real-mode: %s\n", real_mode ? "true" : "false");
-		PROMBOOT_OUTPUT("ELF: real-base: %08x\n", real_base);
-		PROMBOOT_OUTPUT("ELF: real-size: %08x\n", real_size);
-		PROMBOOT_OUTPUT("ELF: virt-base: %08x\n", virt_base);
-		PROMBOOT_OUTPUT("ELF: virt-size: %08x\n", virt_size);
-		PROMBOOT_OUTPUT("ELF: load-base: %08x\n", load_base);
-
-		if (real_mode) {
-			PROMBOOT_OUTPUT("ELF ERROR: real-mode bootup not supported.\n");
-			return false;
+		if (bootinfo) {
+			if (disp_off < bootinfo->elfOffset
+			 || !load_newworld_parcels(f, disp_off - bootinfo->elfOffset, *bootinfo)) {
+				PROMBOOT_OUTPUT("ELF ERROR: cannot load NewWorld toolbox parcels.\n");
+				delete[] phdr;
+				return false;
+			}
 		}
+
+		IO_PROM_TRACE("ELF: real-mode: %s\n", real_mode ? "true" : "false");
+		IO_PROM_TRACE("ELF: real-base: %08x\n", real_base);
+		IO_PROM_TRACE("ELF: real-size: %08x\n", real_size);
+		IO_PROM_TRACE("ELF: virt-base: %08x\n", virt_base);
+		IO_PROM_TRACE("ELF: virt-size: %08x\n", virt_size);
+		IO_PROM_TRACE("ELF: load-base: %08x\n", load_base);
+
+		/*
+		 * Real-mode CHRP clients are loaded with physical addresses below.
+		 * They do not need page-table mappings, and the CPU setup at the end
+		 * of this function starts them with IR/DR clear.  Keep accepting this
+		 * boot mode; older BootX loaders (including Mac OS 9) require it.
+		 */
 
 		sint32 client_size = f.getSize() - disp_off;
 
@@ -628,6 +710,10 @@ bool mapped_load_elf_from_chrp(File &f, uint disp_off)
 		for (int i=0; i < hdr.e_phnum; i++) {
 			if (phdr[i].p_type != 1) // PT_LOAD
 				continue;
+
+			/* Real-mode clients execute from physical segment addresses. */
+			if (real_mode)
+				paddr = phdr[i].p_paddr;
 
 			uint32 vaddr = phdr[i].p_vaddr;
 
@@ -661,6 +747,15 @@ bool mapped_load_elf_from_chrp(File &f, uint disp_off)
 		}
 
 		delete[] phdr;
+
+		/*
+		 * NewWorld BootX uses its low-memory workspace before it creates the
+		 * mappings used by the Mac ROM.  Make the unused bootstrap area
+		 * identity-addressable while preserving the loader's explicit maps.
+		 */
+		prom_map_free_identity_pages(8 * 1024 * 1024);
+		/* Mac I/O is accessed through its physical address by the Mac ROM. */
+		prom_map_identity_range(0x80800000, 0x00080000);
 
 		ppc_cpu_set_pc(0, hdr.e_entry);
 
@@ -1042,6 +1137,8 @@ bool mapped_load_chrp(File &f)
 		uint buflen;
 		char tag[32*1024];
 		char expect[4*1024+1];	// sizeof buf+1
+		NewWorldBootInfo bootinfo;
+		bool haveBootInfo = false;
 		while (1) {
 			chrpReadWaitForChar(f, buf, sizeof buf, '\n');
 			buflen = strlen(buf);
@@ -1072,7 +1169,7 @@ bool mapped_load_chrp(File &f)
 					}
 
 					PROMBOOT_OUTPUT("Loading ELF...\n");
-					return mapped_load_elf_from_chrp(f, f.tell()-1);
+					return mapped_load_elf_from_chrp(f, f.tell()-1, haveBootInfo ? &bootinfo : NULL);
 				} else
 					return false;
 			}
@@ -1093,6 +1190,7 @@ bool mapped_load_chrp(File &f)
 			chrpReadWaitForString(f, buf, sizeof buf, expect);
 			IO_PROM_TRACE("found: %s\n", buf);
 			if (strcmp(tag, "<BOOT-SCRIPT>") == 0) {
+				haveBootInfo = parse_newworld_bootinfo(buf, bootinfo);
 				char *bootpath = strstr(buf, "boot ");
 				if (bootpath) {
 					bootpath += 5;

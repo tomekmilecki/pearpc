@@ -28,8 +28,11 @@ void gen_cr_insert_signed(JITC &jitc, int crfD);
 void gen_cr_insert_unsigned(JITC &jitc, int crfD);
 
 int ppc_opc_addx(PPC_CPU_State &aCPU);
+int ppc_opc_addox(PPC_CPU_State &aCPU);
 int ppc_opc_addcx(PPC_CPU_State &aCPU);
+int ppc_opc_addcox(PPC_CPU_State &aCPU);
 int ppc_opc_addex(PPC_CPU_State &aCPU);
+int ppc_opc_addeox(PPC_CPU_State &aCPU);
 int ppc_opc_addi(PPC_CPU_State &aCPU);
 int ppc_opc_addic(PPC_CPU_State &aCPU);
 int ppc_opc_addic_(PPC_CPU_State &aCPU);
@@ -60,6 +63,8 @@ int ppc_opc_crxor(PPC_CPU_State &aCPU);
 
 int ppc_opc_divwx(PPC_CPU_State &aCPU);
 int ppc_opc_divwux(PPC_CPU_State &aCPU);
+int ppc_opc_divwox(PPC_CPU_State &aCPU);
+int ppc_opc_divwuox(PPC_CPU_State &aCPU);
 
 int ppc_opc_eqvx(PPC_CPU_State &aCPU);
 
@@ -92,7 +97,9 @@ int ppc_opc_srwx(PPC_CPU_State &aCPU);
 
 int ppc_opc_subfx(PPC_CPU_State &aCPU);
 int ppc_opc_subfcx(PPC_CPU_State &aCPU);
+int ppc_opc_subfcox(PPC_CPU_State &aCPU);
 int ppc_opc_subfex(PPC_CPU_State &aCPU);
+int ppc_opc_subfeox(PPC_CPU_State &aCPU);
 int ppc_opc_subfic(PPC_CPU_State &aCPU);
 int ppc_opc_subfmex(PPC_CPU_State &aCPU);
 int ppc_opc_subfzex(PPC_CPU_State &aCPU);

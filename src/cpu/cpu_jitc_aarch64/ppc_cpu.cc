@@ -96,9 +96,11 @@ sys_semaphore gCPUDozeSem;
 
 extern "C" void cpu_doze()
 {
-    if (!gCPU->exception_pending) {
+    while (!__atomic_load_n(&gCPU->exception_pending, __ATOMIC_ACQUIRE)) {
         sys_lock_semaphore(gCPUDozeSem);
-        sys_wait_semaphore_bounded(gCPUDozeSem, 10);
+        if (!__atomic_load_n(&gCPU->exception_pending, __ATOMIC_ACQUIRE)) {
+            sys_wait_semaphore_bounded(gCPUDozeSem, 100);
+        }
         sys_unlock_semaphore(gCPUDozeSem);
     }
 }
@@ -110,12 +112,8 @@ void ppc_cpu_wakeup()
 
 static void decTimerCB(sys_timer t)
 {
-    static int dc = 0;
-    dc++;
-    if (dc <= 10 || dc % 100 == 0) {
-        fprintf(stderr, "[DEC] #%d\n", dc);
-    }
     ppc_cpu_atomic_raise_dec_exception(*gCPU);
+    ppc_cpu_wakeup();
 }
 
 void ppc_cpu_run()
@@ -212,9 +210,12 @@ void ppc_fatal(const char *fmt, ...)
     ppc_cpu_crash_dump(1);
 }
 
+extern "C" void ppc_exc_dump_ring();
+
 void ppc_cpu_crash_dump(int code)
 {
     crash_dump_cpu_state();
+    ppc_exc_dump_ring();
     sys_print_backtrace(64);
     jitc_dump_and_exit(code);
 }

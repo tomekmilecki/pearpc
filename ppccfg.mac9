@@ -1,0 +1,33 @@
+## Mac OS 9.2 G4 Cube disk image
+
+
+ppc_start_resolution = "1024x768x32"
+ppc_start_full_screen = 0
+redraw_interval_msec = 40
+
+key_compose_dialog = "F11"
+key_change_cd_0 = "none"
+key_toggle_mouse_grab = "F12"
+key_toggle_full_screen = "Alt+Return"
+
+prom_bootmethod = "auto"
+prom_env_machargs = "-v"
+prom_driver_graphic = "video.x"
+
+cpu_pvr = 0x000c0201
+
+pci_ide0_master_installed = 1
+pci_ide0_master_image = "/tmp/g4cubebackup-pearpc.img"
+pci_ide0_master_type = "hd"
+
+pci_ide0_slave_installed = 0
+
+pci_3c90x_installed = 0
+pci_rtl8139_installed = 0
+pci_usb_installed = 1
+pci_serial_installed = 0
+pci_macio_pmu = 1
+
+nvram_file = "nvram.mac9"
+framebuffer_dump_file = "/tmp/pearpc-generic-framebuffer.raw"
+memdump_file = "/tmp/pearpc-memory.raw"

@@ -75,6 +75,7 @@ struct PPC_CPU_State {
 	uint64 tb;	// .75 spr 284(l)/285(u)
 	
 	uint32 hid[16];
+	uint32 impl_spr_951;
 	// * internal
 	
 	uint32 pc;

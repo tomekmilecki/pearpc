@@ -380,6 +380,7 @@ void ppc_opc_mfspr()
         break;
     case 29:
         switch (spr1) {
+        case 23: gCPU.gpr[rD] = gCPU.impl_spr_951; return;
         case 16: gCPU.gpr[rD] = 0; return;
         case 17: gCPU.gpr[rD] = 0; return;
         case 18: gCPU.gpr[rD] = 0; return;
@@ -629,6 +630,16 @@ void ppc_opc_mtspr()
         break;
     case 8:
         switch (spr1) {
+        case 28:
+            gCPU.tb = gCPU.ptb / TB_TO_PTB_FACTOR;
+            gCPU.tb = (gCPU.tb & 0xffffffff00000000ULL) | gCPU.gpr[rS];
+            gCPU.ptb = gCPU.tb * TB_TO_PTB_FACTOR;
+            return;
+        case 29:
+            gCPU.tb = gCPU.ptb / TB_TO_PTB_FACTOR;
+            gCPU.tb = (gCPU.tb & 0x00000000ffffffffULL) | ((uint64)gCPU.gpr[rS] << 32);
+            gCPU.ptb = gCPU.tb * TB_TO_PTB_FACTOR;
+            return;
         case 16: gCPU.sprg[0] = gCPU.gpr[rS]; return;
         case 17: gCPU.sprg[1] = gCPU.gpr[rS]; return;
         case 18: gCPU.sprg[2] = gCPU.gpr[rS]; return;
@@ -685,6 +696,7 @@ void ppc_opc_mtspr()
         break;
     case 29:
         switch (spr1) {
+        case 23: gCPU.impl_spr_951 = gCPU.gpr[rS]; return;
         case 17: return;
         case 24: return;
         case 25: return;

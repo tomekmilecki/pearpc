@@ -20,6 +20,7 @@
 
 
 #include <cstring>
+#include <cstdlib>
 
 #include "system/types.h"
 #include "debug/tracers.h"
@@ -41,7 +42,7 @@ static int ppc_opc_invalid(PPC_CPU_State &aCPU)
 {
     fprintf(stderr, "[INVALID] opc=%08x pc=%08x\n", aCPU.current_opc,
         aCPU.current_code_base + aCPU.pc_ofs);
-    SINGLESTEP("unknown instruction\n");
+	SINGLESTEP("unknown instruction\n");
 	return 0;
 }
 
@@ -129,6 +130,13 @@ GEN_INTERPRET(mcrxr)
 GEN_INTERPRET(mftb)
 /* mfmsr has native gen_ in ppc_alu.cc */
 GEN_INTERPRET_ENDBLOCK(mtmsr)
+GEN_INTERPRET(addox)
+GEN_INTERPRET(addcox)
+GEN_INTERPRET(addeox)
+GEN_INTERPRET(subfcox)
+GEN_INTERPRET(subfeox)
+GEN_INTERPRET(divwox)
+GEN_INTERPRET(divwuox)
 
 /* SR — native gen_ in ppc_alu.cc */
 /* mfsr, mtsr, mfsrin, mtsrin have native gen_ in ppc_alu.cc */
@@ -242,8 +250,12 @@ GEN_INTERPRET(dcbi)
 
 static int ppc_opc_special(PPC_CPU_State &aCPU)
 {
-    if (aCPU.pc == gPromOSIEntry && aCPU.current_opc == PROM_MAGIC_OPCODE) {
+    if (prom_osi_is_entry(aCPU.pc) && aCPU.current_opc == PROM_MAGIC_OPCODE) {
         call_prom_osi();
+        return 0;
+    }
+    if (prom_rtas_is_entry(aCPU.pc) && aCPU.current_opc == PROM_RTAS_MAGIC_OPCODE) {
+        call_prom_rtas();
         return 0;
     }
     if (aCPU.current_opc == 0x00333301) {
@@ -477,6 +489,8 @@ static void ppc_opc_init_group2()
     ppc_opc_table_group2[476] = ppc_opc_nandx;
     ppc_opc_table_group2[491] = ppc_opc_divwx;
     ppc_opc_table_group2[512] = ppc_opc_mcrxr;
+    ppc_opc_table_group2[520] = ppc_opc_subfcox;
+    ppc_opc_table_group2[522] = ppc_opc_addcox;
     ppc_opc_table_group2[533] = ppc_opc_lswx;
     ppc_opc_table_group2[534] = ppc_opc_lwbrx;
     ppc_opc_table_group2[535] = ppc_opc_lfsx;
@@ -488,6 +502,8 @@ static void ppc_opc_init_group2()
     ppc_opc_table_group2[598] = ppc_opc_sync;
     ppc_opc_table_group2[599] = ppc_opc_lfdx;
     ppc_opc_table_group2[631] = ppc_opc_lfdux;
+    ppc_opc_table_group2[648] = ppc_opc_subfeox;
+    ppc_opc_table_group2[650] = ppc_opc_addeox;
     ppc_opc_table_group2[659] = ppc_opc_mfsrin;
     ppc_opc_table_group2[661] = ppc_opc_stswx;
     ppc_opc_table_group2[662] = ppc_opc_stwbrx;
@@ -495,8 +511,10 @@ static void ppc_opc_init_group2()
     ppc_opc_table_group2[695] = ppc_opc_stfsux;
     ppc_opc_table_group2[725] = ppc_opc_stswi;
     ppc_opc_table_group2[727] = ppc_opc_stfdx;
+    ppc_opc_table_group2[747] = ppc_opc_mullwx;
     ppc_opc_table_group2[758] = ppc_opc_dcba;
     ppc_opc_table_group2[759] = ppc_opc_stfdux;
+    ppc_opc_table_group2[778] = ppc_opc_addox;
     ppc_opc_table_group2[790] = ppc_opc_lhbrx;
     ppc_opc_table_group2[792] = ppc_opc_srawx;
     ppc_opc_table_group2[824] = ppc_opc_srawix;
@@ -504,8 +522,10 @@ static void ppc_opc_init_group2()
     ppc_opc_table_group2[918] = ppc_opc_sthbrx;
     ppc_opc_table_group2[922] = ppc_opc_extshx;
     ppc_opc_table_group2[954] = ppc_opc_extsbx;
+    ppc_opc_table_group2[971] = ppc_opc_divwuox;
     ppc_opc_table_group2[982] = ppc_opc_icbi;
     ppc_opc_table_group2[983] = ppc_opc_stfiwx;
+    ppc_opc_table_group2[1003] = ppc_opc_divwox;
     ppc_opc_table_group2[1014] = ppc_opc_dcbz;
 
     // Gen functions: naive interpreter calls
@@ -574,6 +594,8 @@ static void ppc_opc_init_group2()
     ppc_opc_table_gen_group2[476] = ppc_opc_gen_nandx;
     ppc_opc_table_gen_group2[491] = ppc_opc_gen_divwx;
     ppc_opc_table_gen_group2[512] = ppc_opc_gen_mcrxr;
+    ppc_opc_table_gen_group2[520] = ppc_opc_gen_subfcox;
+    ppc_opc_table_gen_group2[522] = ppc_opc_gen_addcox;
     ppc_opc_table_gen_group2[533] = ppc_opc_gen_lswx;
     ppc_opc_table_gen_group2[534] = ppc_opc_gen_lwbrx;
     ppc_opc_table_gen_group2[535] = ppc_opc_gen_lfsx;
@@ -585,6 +607,8 @@ static void ppc_opc_init_group2()
     ppc_opc_table_gen_group2[598] = ppc_opc_gen_sync;
     ppc_opc_table_gen_group2[599] = ppc_opc_gen_lfdx;
     ppc_opc_table_gen_group2[631] = ppc_opc_gen_lfdux;
+    ppc_opc_table_gen_group2[648] = ppc_opc_gen_subfeox;
+    ppc_opc_table_gen_group2[650] = ppc_opc_gen_addeox;
     ppc_opc_table_gen_group2[659] = ppc_opc_gen_mfsrin;
     ppc_opc_table_gen_group2[661] = ppc_opc_gen_stswx;
     ppc_opc_table_gen_group2[662] = ppc_opc_gen_stwbrx;
@@ -592,8 +616,10 @@ static void ppc_opc_init_group2()
     ppc_opc_table_gen_group2[695] = ppc_opc_gen_stfsux;
     ppc_opc_table_gen_group2[725] = ppc_opc_gen_stswi;
     ppc_opc_table_gen_group2[727] = ppc_opc_gen_stfdx;
+    ppc_opc_table_gen_group2[747] = ppc_opc_gen_mullwx;
     ppc_opc_table_gen_group2[758] = ppc_opc_gen_dcba;
     ppc_opc_table_gen_group2[759] = ppc_opc_gen_stfdux;
+    ppc_opc_table_gen_group2[778] = ppc_opc_gen_addox;
     ppc_opc_table_gen_group2[790] = ppc_opc_gen_lhbrx;
     ppc_opc_table_gen_group2[792] = ppc_opc_gen_srawx;
     ppc_opc_table_gen_group2[822] = ppc_opc_gen_dss;
@@ -602,8 +628,10 @@ static void ppc_opc_init_group2()
     ppc_opc_table_gen_group2[918] = ppc_opc_gen_sthbrx;
     ppc_opc_table_gen_group2[922] = ppc_opc_gen_extshx;
     ppc_opc_table_gen_group2[954] = ppc_opc_gen_extsbx;
+    ppc_opc_table_gen_group2[971] = ppc_opc_gen_divwuox;
     ppc_opc_table_gen_group2[982] = ppc_opc_gen_icbi;
     ppc_opc_table_gen_group2[983] = ppc_opc_gen_stfiwx;
+    ppc_opc_table_gen_group2[1003] = ppc_opc_gen_divwox;
     ppc_opc_table_gen_group2[1014] = ppc_opc_gen_dcbz;
 
     /* AltiVec load/store (primary opcode 31) */
@@ -911,9 +939,24 @@ static int ppc_opc_group_v(PPC_CPU_State &aCPU)
 
 static JITCFlow ppc_opc_gen_group_v(JITC &jitc)
 {
-    // Route all AltiVec opcodes through interpreter for correctness
-    ppc_opc_gen_interpret(jitc, ppc_opc_group_v);
-    return flowContinue;
+    /*
+     * Route all AltiVec opcodes through the interpreter for correctness.
+     *
+     * KNOWN BUG, deliberately left in place -- see doc/MACOS9_BOOT.md.
+     * ppc_opc_group_v() raises PPC_EXC_NO_VEC and returns non-zero when
+     * MSR_VEC is clear, but ppc_opc_gen_interpret() discards that return
+     * value, so the block runs on with msr already zeroed and SRR0/SRR1/npc
+     * pointing at the AltiVec-unavailable handler.  The correct form is
+     *     ppc_opc_gen_interpret_loadstore(jitc, ppc_opc_group_v);
+     *     return flowEndBlock;
+     * (compare ppc_opc_gen_check_fpu(), which does this for MSR_FP).
+     *
+     * Applying that fix alone makes the Mac OS 9 boot *worse*, because
+     * correctly delivering the trap exposes a second defect: the nanokernel
+     * then refuses to grant the vector unit and loops.  Fix both together.
+     */
+    ppc_opc_gen_interpret_loadstore(jitc, ppc_opc_group_v);
+    return flowEndBlock;
 }
 
 static void ppc_opc_init_groupv()
@@ -1190,6 +1233,14 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
     // - flushFlags(): if it needs up-to-date CR in CPU state
     // - GEN_INTERPRET wrappers call clobberAll() via the prologue
     uint32 mainopc = PPC_OPC_MAIN(aJITC.current_opc);
+    const char *interpretMain = getenv("PPC_INTERPRET_MAIN");
+    if (getenv("PPC_INTERPRET_ALL") ||
+        (interpretMain && strtoul(interpretMain, nullptr, 0) == mainopc)) {
+        ppc_opc_gen_interpret(aJITC, ppc_opc_table_main[mainopc]);
+        aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
+        aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);
+        return flowEndBlockUnreachable;
+    }
     return ppc_opc_table_gen_main[mainopc](aJITC);
 }
 

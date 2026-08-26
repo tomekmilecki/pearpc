@@ -23,8 +23,21 @@
 
 #include "system/types.h"
 #define PROM_MAGIC_OPCODE 0x00345678
+#define PROM_RTAS_MAGIC_OPCODE 0x00345679
+#define PROM_REAL_MODE_ENTRY 0xfffffff0
 
 extern uint32 gPromOSIEntry;
+extern uint32 gPromRTASEntry;
+
+inline bool prom_osi_is_entry(uint32 pc)
+{
+    return pc == gPromOSIEntry || pc == PROM_REAL_MODE_ENTRY;
+}
+
+inline bool prom_rtas_is_entry(uint32 pc)
+{
+    return pc == gPromRTASEntry;
+}
 
 struct prom_args {
 	uint32 service;
@@ -34,6 +47,7 @@ struct prom_args {
 };
 
 void call_prom_osi();
+void call_prom_rtas();
 
 
 #endif

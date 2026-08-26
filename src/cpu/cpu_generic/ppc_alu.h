@@ -22,7 +22,9 @@
 #define __PPC_ALU_H__
 
 void ppc_opc_addx();
+void ppc_opc_addox();
 void ppc_opc_addcx();
+void ppc_opc_addcox();
 void ppc_opc_addex();
 void ppc_opc_addi();
 void ppc_opc_addic();
@@ -54,6 +56,8 @@ void ppc_opc_crxor();
 
 void ppc_opc_divwx();
 void ppc_opc_divwux();
+void ppc_opc_divwox();
+void ppc_opc_divwuox();
 
 void ppc_opc_eqvx();
 
@@ -86,6 +90,7 @@ void ppc_opc_srwx();
 
 void ppc_opc_subfx();
 void ppc_opc_subfcx();
+void ppc_opc_subfcox();
 void ppc_opc_subfex();
 void ppc_opc_subfic();
 void ppc_opc_subfmex();

@@ -311,17 +311,25 @@ static void pci_config_read_write(bool write, int offset, int size)
 		PCI_ADDRESS_UNIT(gPCI_Address), PCI_ADDRESS_FUNCT(gPCI_Address),
 		PCI_ADDRESS_REG(gPCI_Address),PCI_ADDRESS_TYPE(gPCI_Address));
 	
-	if (PCI_ADDRESS_FUNCT(gPCI_Address)) {
-		IO_PCI_ERR("PCI: func != 0\n");
-	}
-	if (PCI_ADDRESS_TYPE(gPCI_Address)) {
-		IO_PCI_ERR("PCI: type != 0\n");
+	/* Type 1 cycles are used to enumerate devices behind a PCI bridge.
+	 * PearPC's device container already includes the bus number, so both
+	 * cycle types can use the same lookup.  Unimplemented functions and
+	 * reserved cycle types behave like an empty PCI slot. */
+	if (PCI_ADDRESS_FUNCT(gPCI_Address) || PCI_ADDRESS_TYPE(gPCI_Address) > 1) {
+		if (!write) {
+			gPCI_Data = 0xffffffff;
+			gPCI_Data_LE = ppc_word_to_LE(gPCI_Data);
+		}
+		return;
 	}
 	if (PCI_ADDRESS_ECD(gPCI_Address)) {
 		PCI_Device empty("", PCI_ADDRESS_BUS(gPCI_Address), PCI_ADDRESS_UNIT(gPCI_Address));
 		PCI_Device *p = (PCI_Device*)gPCI_Devices->get(gPCI_Devices->find(&empty));
 		if (!p) {
-			if (!write) gPCI_Data = 0;
+			if (!write) {
+				gPCI_Data = 0xffffffff;
+				gPCI_Data_LE = ppc_word_to_LE(gPCI_Data);
+			}
 			return;
 		}
 		if (write) {

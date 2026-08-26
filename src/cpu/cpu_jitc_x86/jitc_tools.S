@@ -546,7 +546,7 @@ EXPORT(ppc_isi_exception_asm):
 EXPORT(ppc_ext_exception_asm):
 	mov	[gCPU(srr0)], %eax
 	mov	%edx, [gCPU(msr)]
-	ppc_atomic_cancel_ext_exception_macro
+#	ppc_atomic_cancel_ext_exception_macro
 	and	%edx, 0x87c0ffff
 	mov	[gCPU(srr1)], %edx
 	exception_epilogue 0x500

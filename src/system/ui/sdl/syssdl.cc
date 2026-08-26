@@ -71,7 +71,14 @@ static uint8 scancode_to_adb_key[256] = {
 static bool handleSDLEvent(const SDL_Event &event)
 {
 	static bool mouseButton[3] = {false, false, false};
+	static int inputDebugCount = 0;
 	bool tmpMouseButton[3];
+	if (inputDebugCount < 10 &&
+	    (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+		fprintf(stderr, "[INPUT-DEBUG] SDL mouse type=%x button=%d down=%d\n", event.type, event.button.button,
+		        event.button.down);
+		++inputDebugCount;
+	}
 
 	SystemEvent ev;
 	switch (event.type) {
@@ -161,19 +168,38 @@ static bool handleSDLEvent(const SDL_Event &event)
 		ev.mouse.rely = 0;
 		gMouse->handleEvent(ev);
 		return true;
-	case SDL_EVENT_MOUSE_MOTION:
+	case SDL_EVENT_MOUSE_MOTION: {
+		/*
+		 * SDL3 reports motion deltas as floats.  A trackpad delivers plenty of
+		 * sub-pixel deltas (0.3, -0.7, ...), so truncating each event on its own
+		 * throws all of them away and the guest pointer never moves.  Carry the
+		 * fraction over to the next event instead.
+		 */
+		static float accumX = 0.0f, accumY = 0.0f;
+		accumX += event.motion.xrel;
+		accumY += event.motion.yrel;
+		int relx = (int)accumX;
+		int rely = (int)accumY;
+		accumX -= (float)relx;
+		accumY -= (float)rely;
+		/*
+		 * The PMU can only hold one ADB reply at a time and drops events while
+		 * one is outstanding, so do not spend that slot on a no-op packet.
+		 */
+		if (!relx && !rely) return true;
 		ev.type = sysevMouse;
 		ev.mouse.type = sme_motionNotify;
 		ev.mouse.button1 = mouseButton[0];
 		ev.mouse.button2 = mouseButton[1];
 		ev.mouse.button3 = mouseButton[2];
 		ev.mouse.dbutton = 0;
-		ev.mouse.x = (int)event.motion.y;
-		ev.mouse.y = (int)event.motion.x;
-		ev.mouse.relx = (int)event.motion.xrel;
-		ev.mouse.rely = (int)event.motion.yrel;
+		ev.mouse.x = (int)event.motion.x;
+		ev.mouse.y = (int)event.motion.y;
+		ev.mouse.relx = relx;
+		ev.mouse.rely = rely;
 		gMouse->handleEvent(ev);
 		return true;
+	}
 	case SDL_EVENT_WINDOW_SHOWN:
 	case SDL_EVENT_WINDOW_RESTORED:
 		gDisplay->setExposed(true);
@@ -202,6 +228,11 @@ SystemMouse *allocSystemMouse();
 
 void initUI(const char *title, const DisplayCharacteristics &aCharacteristics, int redraw_ms, const KeyboardCharacteristics &keyConfig, bool fullscreen)
 {
+	SDL_SetAppMetadata("PearPC", NULL, "org.pearpc.PearPC");
+	SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "0");
+	SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "1");
+	SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "1");
+
 	// SDL must be initialized on the main thread (macOS requirement)
 	if (!SDL_Init(SDL_INIT_VIDEO)) {
 		ht_printf("SDL: Unable to init: %s\n", SDL_GetError());

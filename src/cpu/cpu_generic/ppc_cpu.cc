@@ -48,9 +48,6 @@
 PPC_CPU_State gCPU;
 Debugger *gDebugger;
 
-static FILE *gGenericTraceLog = NULL;
-static uint64 gGenericTraceCount = 0;
-
 static bool gSinglestep = false;
 
 //uint32 gBreakpoint2 = 0x11b3acf4;
@@ -114,12 +111,6 @@ void ppc_cpu_run()
     gDebugger->mAlwaysShowRegs = true;
     PPC_CPU_TRACE("execution started at %08x\n", gCPU.pc);
 
-    gGenericTraceLog = fopen("trace_generic.log", "w");
-    if (gGenericTraceLog) {
-        setvbuf(gGenericTraceLog, NULL, _IOFBF, 256 * 1024);
-    }
-
-    uint ops = 0;
     gCPU.effective_code_page = 0xffffffff;
     //	ppc_fpu_test();
     //	return;
@@ -142,21 +133,6 @@ void ppc_cpu_run()
             continue;
         }
         ppc_exec_opc();
-        ops++;
-
-        if (gGenericTraceLog && (ops % 10000) == 0) {
-            gGenericTraceCount++;
-            fprintf(gGenericTraceLog,
-                    "%llu pc=%08x msr=%08x cr=%08x lr=%08x ctr=%08x "
-                    "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
-                    "dec=%08x pdec=%016llx\n",
-                    gGenericTraceCount, gCPU.pc, gCPU.msr, gCPU.cr, gCPU.lr, gCPU.ctr, gCPU.gpr[0], gCPU.gpr[1],
-                    gCPU.gpr[2], gCPU.gpr[3], gCPU.gpr[4], gCPU.gpr[5], gCPU.dec, (unsigned long long)gCPU.pdec);
-            if (gGenericTraceCount % 100 == 0) {
-                fflush(gGenericTraceLog);
-            }
-        }
-
         gCPU.ptb++;
         if (gCPU.pdec == 0) {
             gCPU.exception_pending = true;
@@ -165,39 +141,6 @@ void ppc_cpu_run()
         } else {
             gCPU.pdec--;
         }
-        if ((ops & 0x3ffff) == 0) {
-            /*			if (pic_check_interrupt()) {
-				gCPU.exception_pending = true;
-				gCPU.ext_exception = true;
-			}*/
-            if ((ops & 0x0fffff) == 0) {
-                //				uint32 j=0;
-                //				ppc_read_effective_word(0xc046b2f8, j);
-
-                ht_printf("@%08x (%u ops) pdec: %08x lr: %08x\r", gCPU.pc, ops, gCPU.pdec, gCPU.lr);
-#if 0
-				extern uint32 PIC_enable_low;
-				extern uint32 PIC_enable_high;
-				ht_printf("enable ");
-				int x = 1;
-				for (int i=0; i<31; i++) {
-					if (PIC_enable_low & x) {
-						ht_printf("%d ", i);
-		    			}
-					x<<=1;
-				}
-				x=1;
-				for (int i=0; i<31; i++) {
-					if (PIC_enable_high & x) {
-						ht_printf("%d ", 32+i);
-		    			}
-					x<<=1;
-				}
-				ht_printf("\n");
-#endif
-            }
-        }
-
         gCPU.pc = gCPU.npc;
 
         if (gCPU.exception_pending) {
@@ -212,11 +155,10 @@ void ppc_cpu_run()
                 sys_lock_mutex(exception_mutex);
                 if (gCPU.ext_exception) {
                     ppc_exception(PPC_EXC_EXT_INT);
-                    gCPU.ext_exception = false;
                     gCPU.pc = gCPU.npc;
-                    if (!gCPU.dec_exception) {
-                        gCPU.exception_pending = false;
-                    }
+                    /* The external interrupt input is level-sensitive. The
+                     * interrupt controller clears it when the guest
+                     * acknowledges or masks the source. */
                     sys_unlock_mutex(exception_mutex);
                     continue;
                 }
@@ -269,12 +211,6 @@ void ppc_cpu_run()
             fclose(df);
             ht_printf("[DUMP] wrote %s (%u bytes)\n", gFramebufferDumpFile, fbSize);
         }
-    }
-    if (gGenericTraceLog) {
-        fflush(gGenericTraceLog);
-        fclose(gGenericTraceLog);
-        gGenericTraceLog = NULL;
-        ht_printf("[DUMP] wrote trace_generic.log (%llu entries)\n", gGenericTraceCount);
     }
 }
 

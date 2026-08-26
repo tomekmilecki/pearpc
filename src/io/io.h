@@ -57,7 +57,8 @@ static inline int io_mem_write(uint32 addr, uint32 data, int size)
 		pci_write(addr, data, size);
 		return IO_MEM_ACCESS_OK;
 	}
-	if (addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) {
+	if ((addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) ||
+	    (addr >= IO_OPENPIC_PA_START && addr < IO_OPENPIC_PA_END)) {
 		pic_write(addr, data, size);
 		return IO_MEM_ACCESS_OK;
 	}
@@ -129,7 +130,8 @@ static inline int io_mem_read_impl(uint32 addr, uint32 &data, int size)
 		pci_read(addr, data, size);
 		return IO_MEM_ACCESS_OK;
 	}
-	if (addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) {
+	if ((addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) ||
+	    (addr >= IO_OPENPIC_PA_START && addr < IO_OPENPIC_PA_END)) {
 		pic_read(addr, data, size);
 		return IO_MEM_ACCESS_OK;
 	}

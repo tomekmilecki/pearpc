@@ -27,6 +27,7 @@
 #include "io/graphic/gcard.h"
 #include "io/cuda/cuda.h"
 #include "io/pic/pic.h"
+#include "io/nvram/nvram.h"
 #include "io/ide/ide.h"
 #include "io/3c90x/3c90x.h"
 #include "io/rtl8139/rtl8139.h"
@@ -373,6 +374,16 @@ PromInstance *PromNodeATY::createInstance(const String &param)
 {
 	return new PromInstanceATY(this, param);
 }
+
+PromNodeOpen::PromNodeOpen(const char *name)
+    : PromNode(name)
+{
+}
+
+PromInstance *PromNodeOpen::createInstance(const String &param)
+{
+    return new PromInstance(this, param);
+}
 /*
  *
  */
@@ -541,7 +552,7 @@ void PromInstanceRTAS::callMethod(const char *method, prom_args *pa)
 	if (strcmp(method, "instantiate-rtas") == 0) {
 	// instantiate-rtas(void *rtas_data, int ret1, int rtas_entry)
 		pa->args[3] = 0;
-		pa->args[4] = 0;
+		pa->args[4] = gPromRTASEntry;
 	} else {
 	}	
 }
@@ -575,11 +586,18 @@ void PromInstanceMMU::callMethod(const char *method, prom_args *pa)
 		uint32 phys;
 		if (!ppc_prom_effective_to_physical(phys, virt)) {
 			IO_PROM_ERR("translate failed\n");
+			pa->args[3] = 0;
+			pa->args[4] = 0;
 		} else {
+			/*
+			 * The client-interface return area is stack ordered: catch-result,
+			 * mode, phys-hi, phys-lo.  The ROM uses the final cell as the
+			 * 32-bit physical address when it builds its relocation records.
+			 */
+			pa->args[3] = 0;
 			pa->args[4] = 0;
 			pa->args[5] = 0;
-			pa->args[6] = 0;
-			pa->args[7] = phys;
+			pa->args[6] = phys;
 		}
 		IO_PROM_TRACE("=%08x\n", phys);
 //		gSinglestep = true;
@@ -588,9 +606,15 @@ void PromInstanceMMU::callMethod(const char *method, prom_args *pa)
 		// claim virtual memory
 		// mmu->claim(ihandle, "claim", virt, size, align, *addr);
 		uint32 virt = pa->args[4];
-		uint32 size UNUSED = pa->args[3];
-		uint32 align UNUSED = pa->args[2];
+		uint32 size = pa->args[3];
+		uint32 align = pa->args[2];
 		IO_PROM_TRACE("mmu->claim(%08x, %08x, %08x)\n", virt, size, align);
+		if (!virt) virt = prom_allocate_virt(size, align);
+		if (virt == (uint32)-1) {
+			pa->args[5] = (uint32)-1;
+			pa->args[6] = 0;
+			return;
+		}
 		pa->args[5] = 0;
 		pa->args[6] = virt;
 		return;
@@ -633,6 +657,69 @@ PromNodeMemory::PromNodeMemory(const char *name)
 PromInstance *PromNodeMemory::createInstance(const String &param)
 {
 	return new PromInstanceMemory(this, param);
+}
+
+PromNodeNVRAM::PromNodeNVRAM(const char *name)
+	: PromNode(name)
+{
+}
+
+PromInstance *PromNodeNVRAM::createInstance(const String &param)
+{
+	return new PromInstanceNVRAM(this, param);
+}
+
+PromInstanceNVRAM::PromInstanceNVRAM(PromNode *type, const String &param)
+	: PromInstance(type, param), mPosition(0)
+{
+}
+
+uint32 PromInstanceNVRAM::read(uint32 buf, int length)
+{
+	uint32 phys;
+	if (!ppc_prom_effective_to_physical(phys, buf)) return 0;
+	int count = MIN(length, (int)(0x2000 - mPosition));
+	for (int i = 0; i < count; i++) {
+		uint32 value;
+		nvram_read(IO_NVRAM_PA_START + (mPosition + i) * 16, value, 1);
+		byte data = value;
+		ppc_dma_write(phys + i, &data, 1);
+	}
+	mPosition += count;
+	return count;
+}
+
+uint32 PromInstanceNVRAM::write(uint32 buf, int length)
+{
+	uint32 phys;
+	if (!ppc_prom_effective_to_physical(phys, buf)) return 0;
+	int count = MIN(length, (int)(0x2000 - mPosition));
+	for (int i = 0; i < count; i++) {
+		byte data;
+		ppc_dma_read(&data, phys + i, 1);
+		nvram_write(IO_NVRAM_PA_START + (mPosition + i) * 16, data, 1);
+	}
+	mPosition += count;
+	return count;
+}
+
+uint32 PromInstanceNVRAM::seek(uint64 pos)
+{
+	if (pos > 0x2000) return (uint32)-1;
+	mPosition = pos;
+	return 0;
+}
+
+void PromInstanceNVRAM::callMethod(const char *method, prom_args *pa)
+{
+	if (strcmp(method, "size") == 0) {
+		/* status, size-high, size-low */
+		pa->args[2] = 0;
+		pa->args[3] = 0;
+		pa->args[4] = 0x2000;
+		return;
+	}
+	PromInstance::callMethod(method, pa);
 }
 
 /*
@@ -740,7 +827,17 @@ PromInstance *PromNodeDisk::createInstance(const String &param)
 			filename.assign(f);
 		}
 		IO_PROM_TRACE("FS: opening '%y'\n", &filename);
-		file = mFS->open(filename);
+		/*
+		 * NewWorld Mac ROMs reopen their startup image as "BootX" through
+		 * Open Firmware. The HFS/HFS+ backends identify that image by its
+		 * blessed-folder/type-creator metadata rather than by a catalog name,
+		 * so resolve this conventional OF filename through openBootFile().
+		 */
+		if (strcmp(filename.contentChar(), "BootX") == 0) {
+			file = mFS->openBootFile();
+		} else {
+			file = mFS->open(filename);
+		}
 		if (file) {
 			IO_PROM_TRACE("FS: file found!\n");
 			return new PromInstanceDiskFile(this, file);
@@ -1096,11 +1193,19 @@ void prom_init_device_tree()
 	PromNode *rom = new PromNode("rom@ff800000");
 	PromNode *pci = new PromNode("pci@80000000");
 
-	gPromRoot->addProp(new PromPropString("model", EMULATOR_MODEL));
-	gPromRoot->addProp(new PromPropString("compatible", "PowerMac1,2\0PowerMac1,1\0MacRISC\0Power Macintosh"));
-	gPromRoot->addProp(new PromPropString("copyright", COPYRIGHT));
+	/* Identify the emulated NewWorld G4 platform to the Mac OS ROM. */
+    const bool pmuPlatform = cuda_is_pmu();
+    const char *machineModel = pmuPlatform ? "PowerMac5,1" : "PowerMac3,1";
+    gPromRoot->addProp(new PromPropString("model", machineModel));
+    const char cudaCompatible[] = "PowerMac3,1\0MacRISC2\0MacRISC\0Power Macintosh";
+    const char pmuCompatible[] = "PowerMac5,1\0MacRISC2\0MacRISC\0Power Macintosh";
+    gPromRoot->addProp(new PromPropMemory("compatible", pmuPlatform ? (const void *)pmuCompatible : cudaCompatible,
+                                         pmuPlatform ? sizeof pmuCompatible : sizeof cudaCompatible));
+	/* NewWorld Mac ROM verifies this Open Firmware identity string at boot. */
+	gPromRoot->addProp(new PromPropString("copyright", "Copyright 1983-1999 Apple Computer, Inc. All Rights Reserved."));
 	gPromRoot->addProp(new PromPropString("device_type", "bootrom"));
 	gPromRoot->addProp(new PromPropString("system-id", "42"));
+	gPromRoot->addProp(new PromPropInt("AAPL,cpu-id", 0));
 	gPromRoot->addProp(new PromPropInt("#address-cells", 1));
 	gPromRoot->addProp(new PromPropInt("#size-cells", 1));
 	gPromRoot->addProp(new PromPropInt("clock-frequency", 1));
@@ -1112,6 +1217,8 @@ void prom_init_device_tree()
 
 	PromNode *cpu = new PromNode("PowerPC,G4");
 	cpus->addNode(cpu);
+	/* NewWorld BootX locates the boot CPU through /cpus/@0. */
+	cpus->addNodeShort("", "PowerPC,G4");
 	cpus->addProp(new PromPropInt("#size-cells", 0));
 	cpu->addProp(new PromPropString("device_type", "cpu"));
 	cpu->addProp(new PromPropInt("reg", 0));
@@ -1129,11 +1236,20 @@ void prom_init_device_tree()
 	cpu->addProp(new PromPropInt("i-cache-sets", 0x80));
 	cpu->addProp(new PromPropInt("i-cache-block-size", 0x20));
 	cpu->addProp(new PromPropInt("d-cache-block-size", 0x20));
-	cpu->addProp(new PromPropString("graphics", ""));
+	/*
+	 * "graphics" advertises the AltiVec (graphics) instruction group and
+	 * "data-streams" the dst/dstt prefetch instructions.  Mac OS uses these to
+	 * decide whether BlockMove may take its AltiVec path; PearPC's vector-unit
+	 * context switching does not converge, so leave them out for now.
+	 */
+	const bool advertiseAltiVec = true;
+	if (advertiseAltiVec) {
+		cpu->addProp(new PromPropString("graphics", ""));
+		cpu->addProp(new PromPropString("data-streams", ""));
+	}
 	cpu->addProp(new PromPropString("performance-monitor", ""));
-	cpu->addProp(new PromPropString("data-streams", ""));
 	
-	PromNode *cache = new PromNode("cache");
+	PromNode *cache = new PromNode("l2-cache");
 	cpu->addProp(new PromPropInt("l2-cache", cache->getPHandle()));
 	cache->addProp(new PromPropString("device_type", "cache"));
 	cache->addProp(new PromPropInt("i-cache-size", 0x100000));
@@ -1163,6 +1279,9 @@ void prom_init_device_tree()
 	PromNode *bootrom = new PromNode("boot-rom@fff00000");
 	rom->addNode(bootrom);
 	rom->addNodeShort("boot-rom", "boot-rom@fff00000");
+	/* NewWorld bootinfo expects this package while relocating the toolbox ROM. */
+	PromNode *macosrom = new PromNode("macos");
+	rom->addNode(macosrom);
 	byte regbootrom[] = {0xff,0xf0,0x00,0x00, 0x00,0x10,0x00,0x00};
 	bootrom->addProp(new PromPropMemory("reg", &regbootrom, sizeof regbootrom));	
 	bootrom->addProp(new PromPropString("write-characteristic", "flash"));
@@ -1177,12 +1296,30 @@ void prom_init_device_tree()
 	bootrom->addProp(new PromPropMemory("info", &bootrominfo, sizeof bootrominfo));
 	
 	gPromRoot->addNode(rtas);
+	/* A NewWorld Mac ROM requires RTAS to be advertised before it loads. */
+	rtas->addProp(new PromPropInt("rtas-size", 0x10000));
+	rtas->addProp(new PromPropInt("nvram-fetch", 1));
+	rtas->addProp(new PromPropInt("nvram-store", 2));
+	rtas->addProp(new PromPropInt("get-time-of-day", 3));
+	rtas->addProp(new PromPropInt("set-time-of-day", 4));
+	rtas->addProp(new PromPropInt("system-reboot", 5));
+	rtas->addProp(new PromPropInt("power-off", 6));
+	rtas->addProp(new PromPropInt("set-time-for-power-on", 7));
+	rtas->addProp(new PromPropInt("get-time-for-power-on", 8));
+	rtas->addProp(new PromPropInt("event-scan", 9));
+	rtas->addProp(new PromPropInt("check-exception", 10));
+	rtas->addProp(new PromPropInt("read-pci-config", 11));
+	rtas->addProp(new PromPropInt("write-pci-config", 12));
 	gPromRoot->addNode(mmu);
 	memory->addProp(new PromPropString("device_type", "memory"));
 	uint32 memorySize = ppc_get_memory_size();
-	byte reg[] = {0, 0, 0, 0, UINT32(memorySize), 0, 0, 0, 0, 0, 0, 0, 0};
+	/* One address/size pair: the previous 13-byte value was not a valid reg property. */
+	byte reg[] = {0, 0, 0, 0, UINT32(memorySize)};
 	memory->addProp(new PromPropMemory("reg", &reg, sizeof reg));
-	byte av[] = {0, 0xa0, 0, 0, 1, 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	/* Keep the low boot workspace and the PROM heap out of the OS-visible range. */
+	uint32 availableStart = 0x00a00000;
+	uint32 availableSize = memorySize - PROM_MEM_SIZE - availableStart;
+	byte av[] = {UINT32(availableStart), UINT32(availableSize)};
 	memory->addProp(new PromPropMemory("available", &av, sizeof av));
 	PromNode *pic = new PromNode("interrupt-controller@10");
 	PromNode *bridge = new PromNode("pci-bridge@d");
@@ -1214,15 +1351,21 @@ void prom_init_device_tree()
 	byte interruptmap23[] = {
 	// aty
 	0x00,0x00,0x38,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
-	UINT32(phandlepic),  0x00,0x00,0x00,IO_PIC_IRQ_GCARD};
+	UINT32(phandlepic),  0x00,0x00,0x00,IO_PIC_IRQ_GCARD, 0x00,0x00,0x00,0x00};
 	pci->addProp(new PromPropMemory("interrupt-map", &interruptmap23, sizeof interruptmap23));
 	byte interruptmapmask23[] = {
 	0x00,0x00,0xf8,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
 	pci->addProp(new PromPropMemory("interrupt-map-mask", &interruptmapmask23, sizeof interruptmapmask23));
 
 	PromNode *macio = new PromNode("mac-io@5");
-	bridge->addNode(macio);
-	bridge->addNodeShort("macio", "mac-io@5");
+	/*
+	 * NewWorld BootX looks up the interrupt controller at
+	 * /pci/mac-io/interrupt-controller.  Keep the ATA controller behind the
+	 * PCI bridge, but expose Mac I/O directly below the host PCI node.
+	 */
+	pci->addNode(macio);
+	pci->addNodeShort("mac-io", "mac-io@5");
+	pci->addNodeShort("macio", "mac-io@5");
 	bridge->addProp(new PromPropInt("vendor-id", 0x1011));
 	bridge->addProp(new PromPropInt("device-id", 0x0026));
 	bridge->addProp(new PromPropInt("revision-id", 2));
@@ -1261,19 +1404,19 @@ void prom_init_device_tree()
 	UINT32(phandlepic), 0x00,0x00,0x00,0x17,*/
 	// ide
 	0x00,0x00,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_IDE0,
+	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_IDE0, 0x00,0x00,0x00,0x00,
 	// macio
 	0x00,0x00,0x28,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	UINT32(phandlepic), 0x00,0x00,0x00,0x18,
+	UINT32(phandlepic), 0x00,0x00,0x00,0x18, 0x00,0x00,0x00,0x00,
 	// eth0
 	0x00,0x00,0x60,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_ETHERNET0,
+	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_ETHERNET0, 0x00,0x00,0x00,0x00,
 	// eth1
 	0x00,0x00,0x68,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_ETHERNET1,
+	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_ETHERNET1, 0x00,0x00,0x00,0x00,
 	// usb
 	0x00,0x00,0x30,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_USB
+	UINT32(phandlepic), 0x00,0x00,0x00,IO_PIC_IRQ_USB, 0x00,0x00,0x00,0x00
 	};
 
 	bridge->addProp(new PromPropMemory("interrupt-map", &interruptmap22, sizeof interruptmap22));
@@ -1349,11 +1492,11 @@ void prom_init_device_tree()
 	}
 	macio->addProp(new PromPropString("device_type", "mac-io"));
 	macio->addProp(new PromPropInt("vendor-id", 0x106b));
-	macio->addProp(new PromPropInt("device-id", 0x0017));
-	macio->addProp(new PromPropInt("revision-id", 0));
+	macio->addProp(new PromPropInt("device-id", 0x0022));
+	macio->addProp(new PromPropInt("revision-id", 3));
 	macio->addProp(new PromPropInt("class-code", 0xff0000));
-	macio->addProp(new PromPropString("model", "AAPL,343S1211"));
-	macio->addProp(new PromPropMemory("compatible", "paddington\0heathrow", 19));
+	macio->addProp(new PromPropString("model", "KeyLargo"));
+	macio->addProp(new PromPropString("compatible", "Keylargo"));
 	byte reg4[] = {
 	//   bus   dev
 	0x00,0x01,0x28,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
@@ -1393,54 +1536,251 @@ void prom_init_device_tree()
 */
 	macio->addNode(pic);
 	macio->addNodeShort("interrupt-controller", "interrupt-controller@10");
-	pic->addProp(new PromPropString("device_type", "interrupt-controller"));
-	pic->addProp(new PromPropMemory("compatible", "heathrow\0mac-risc\0", 18));
-	byte reg2[] = {0, 0, 0, 0x10, 0, 0, 0, 0x20};
+	pic->addProp(new PromPropInt("AAPL,phandle", pic->getPHandle()));
+	pic->addProp(new PromPropString("device_type", "open-pic"));
+	pic->addProp(new PromPropString("compatible", "chrp,open-pic"));
+	pic->addProp(new PromPropMemory("built-in", "", 0));
+	byte reg2[] = {0, 0x04, 0, 0, 0, 0x04, 0, 0};
 	pic->addProp(new PromPropMemory("reg", &reg2, sizeof reg2));
-	pic->addProp(new PromPropInt("#interrupt-cells", 1));
-	pic->addProp(new PromPropString("interrupt-controller", ""));
-	PromNode *via = new PromNode("via-cuda@16000");
+	pic->addProp(new PromPropInt("#interrupt-cells", 2));
+	pic->addProp(new PromPropInt("#address-cells", 0));
+	pic->addProp(new PromPropInt("clock-frequency", 4166666));
+	/* IEEE 1275 boolean properties are present with a zero-byte value. */
+	pic->addProp(new PromPropMemory("interrupt-controller", "", 0));
+	PromNode *timer = new PromNode("timer@15000");
+	macio->addNode(timer);
+	byte timerReg[] = {0x00,0x01,0x50,0x00, 0x00,0x00,0x10,0x00};
+	timer->addProp(new PromPropMemory("reg", timerReg, sizeof timerReg));
+
+    /*
+     * The Mac OS ROM uses these nodes to initialize the classic SCCRd and
+     * SCCWr low-memory globals.  Both the current KeyLargo interface and its
+     * CHRP legacy alias describe the same Z85C30 channels.
+     */
+    /*
+     * A Power Mac G4 Cube has no serial ports.  KeyLargo contains an ESCC cell,
+     * but advertising it makes Mac OS open the port and poll a receive ring that
+     * can never be fed, which stalls startup.  Set to true to restore the nodes.
+     */
+    const bool advertiseESCC = true;
+    /*
+     * A Cube has no physical serial ports.  Advertising the escc cell itself
+     * satisfies the ROM's resource probe, but publishing the ch-a/ch-b children
+     * (device_type = "serial") is what makes Mac OS open a port and poll a
+     * receive ring nothing can feed.  Keep the parent, drop the children.
+     */
+    const bool advertiseSerialPorts = false;
+    if (advertiseESCC) {
+    PromNode *escc = new PromNode("escc@13000");
+    macio->addNode(escc);
+    macio->addNodeShort("escc", "escc@13000");
+    escc->addProp(new PromPropInt("#address-cells", 1));
+    escc->addProp(new PromPropInt("#size-cells", 1));
+    byte esccReg[] = {0x00,0x01,0x30,0x00, 0x00,0x00,0x10,0x00};
+    escc->addProp(new PromPropMemory("reg", esccReg, sizeof esccReg));
+    escc->addProp(new PromPropString("device_type", "escc"));
+    const char esccCompatible[] = "escc\0CHRP,es0";
+    escc->addProp(new PromPropMemory("compatible", esccCompatible, sizeof esccCompatible));
+    escc->addProp(new PromPropMemory("ranges", "", 0));
+
+    byte esccAInterrupts[] = {
+        0x00,0x00,0x00,0x25, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x00,0x04, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x05, 0x00,0x00,0x00,0x00
+    };
+    byte esccBInterrupts[] = {
+        0x00,0x00,0x00,0x24, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x00,0x06, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x07, 0x00,0x00,0x00,0x00
+    };
+        if (advertiseSerialPorts) {
+PromNode *esccA = new PromNode("ch-a@13020");
+    escc->addNode(esccA);
+    escc->addNodeShort("ch-a", "ch-a@13020");
+    esccA->addProp(new PromPropString("device_type", "serial"));
+    esccA->addProp(new PromPropString("compatible", "chrp,es2"));
+    byte esccAReg[] = {
+        0x00,0x01,0x30,0x20, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x30,0x30, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x30,0x50, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x84,0x00, 0x00,0x00,0x01,0x00,
+        0x00,0x00,0x85,0x00, 0x00,0x00,0x01,0x00
+    };
+    esccA->addProp(new PromPropMemory("reg", esccAReg, sizeof esccAReg));
+    esccA->addProp(new PromPropMemory("interrupts", esccAInterrupts, sizeof esccAInterrupts));
+    esccA->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
+    esccA->addProp(new PromPropInt("slot-names", 0));
+
+    PromNode *esccB = new PromNode("ch-b@13000");
+    escc->addNode(esccB);
+    escc->addNodeShort("ch-b", "ch-b@13000");
+    esccB->addProp(new PromPropString("device_type", "serial"));
+    esccB->addProp(new PromPropString("compatible", "chrp,es3"));
+    byte esccBReg[] = {
+        0x00,0x01,0x30,0x00, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x30,0x10, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x30,0x40, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x86,0x00, 0x00,0x00,0x01,0x00,
+        0x00,0x00,0x87,0x00, 0x00,0x00,0x01,0x00
+    };
+    esccB->addProp(new PromPropMemory("reg", esccBReg, sizeof esccBReg));
+    esccB->addProp(new PromPropMemory("interrupts", esccBInterrupts, sizeof esccBInterrupts));
+    esccB->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
+    esccB->addProp(new PromPropInt("slot-names", 0));
+
+        }
+
+PromNode *esccLegacy = new PromNode("escc-legacy@12000");
+    macio->addNode(esccLegacy);
+    macio->addNodeShort("escc-legacy", "escc-legacy@12000");
+    esccLegacy->addProp(new PromPropInt("#address-cells", 1));
+    esccLegacy->addProp(new PromPropInt("#size-cells", 1));
+    byte esccLegacyReg[] = {0x00,0x01,0x20,0x00, 0x00,0x00,0x10,0x00};
+    esccLegacy->addProp(new PromPropMemory("reg", esccLegacyReg, sizeof esccLegacyReg));
+    esccLegacy->addProp(new PromPropString("device_type", "escc-legacy"));
+    esccLegacy->addProp(new PromPropString("compatible", "chrp,es1"));
+    esccLegacy->addProp(new PromPropMemory("ranges", "", 0));
+
+        if (advertiseSerialPorts) {
+PromNode *esccLegacyA = new PromNode("ch-a@12002");
+    esccLegacy->addNode(esccLegacyA);
+    esccLegacy->addNodeShort("ch-a", "ch-a@12002");
+    esccLegacyA->addProp(new PromPropString("device_type", "serial"));
+    esccLegacyA->addProp(new PromPropString("compatible", "chrp,es4"));
+    byte esccLegacyAReg[] = {
+        0x00,0x01,0x20,0x02, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x20,0x06, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x20,0x0a, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x84,0x00, 0x00,0x00,0x01,0x00,
+        0x00,0x00,0x85,0x00, 0x00,0x00,0x01,0x00
+    };
+    esccLegacyA->addProp(new PromPropMemory("reg", esccLegacyAReg, sizeof esccLegacyAReg));
+    esccLegacyA->addProp(new PromPropMemory("interrupts", esccAInterrupts, sizeof esccAInterrupts));
+    esccLegacyA->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
+    esccLegacyA->addProp(new PromPropInt("slot-names", 0));
+
+    PromNode *esccLegacyB = new PromNode("ch-b@12000");
+    esccLegacy->addNode(esccLegacyB);
+    esccLegacy->addNodeShort("ch-b", "ch-b@12000");
+    esccLegacyB->addProp(new PromPropString("device_type", "serial"));
+    esccLegacyB->addProp(new PromPropString("compatible", "chrp,es5"));
+    byte esccLegacyBReg[] = {
+        0x00,0x01,0x20,0x00, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x20,0x04, 0x00,0x00,0x00,0x01,
+        0x00,0x01,0x20,0x08, 0x00,0x00,0x00,0x01,
+        0x00,0x00,0x86,0x00, 0x00,0x00,0x01,0x00,
+        0x00,0x00,0x87,0x00, 0x00,0x00,0x01,0x00
+    };
+    esccLegacyB->addProp(new PromPropMemory("reg", esccLegacyBReg, sizeof esccLegacyBReg));
+    esccLegacyB->addProp(new PromPropMemory("interrupts", esccBInterrupts, sizeof esccBInterrupts));
+    esccLegacyB->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
+    esccLegacyB->addProp(new PromPropInt("slot-names", 0));
+
+        }
+
+aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/ch-a@13020"));
+    aliases->addProp(new PromPropString("sccb", "/pci@80000000/mac-io@5/escc@13000/ch-b@13000"));
+    }
+
+	PromNode *gpio = NULL;
+    if (pmuPlatform) {
+        gpio = new PromNode("gpio");
+        macio->addNode(gpio);
+        gpio->addProp(new PromPropString("device_type", "gpio"));
+        gpio->addProp(new PromPropString("compatible", "mac-io-gpio"));
+        gpio->addProp(new PromPropInt("#address-cells", 1));
+        gpio->addProp(new PromPropInt("#size-cells", 0));
+        byte gpioReg[] = {0, 0, 0, 0x50, 0, 0, 0, 0x30};
+        gpio->addProp(new PromPropMemory("reg", gpioReg, sizeof gpioReg));
+
+        PromNode *extint = new PromNode("extint-gpio1");
+        gpio->addNode(extint);
+        byte gpioInterrupt[] = {0, 0, 0, IO_PIC_IRQ_PMU_EXTINT, 0, 0, 0, 1};
+        extint->addProp(new PromPropMemory("interrupts", gpioInterrupt, sizeof gpioInterrupt));
+        extint->addProp(new PromPropInt("reg", 9));
+        const char gpioCompatible[] = "keywest-gpio1\0gpio";
+        extint->addProp(new PromPropMemory("compatible", gpioCompatible, sizeof gpioCompatible));
+        extint->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
+    }
+
+    const char *viaName = pmuPlatform ? "via-pmu@16000" : "via-cuda@16000";
+    PromNode *via = new PromNode(viaName);
 	macio->addNode(via);
-	macio->addNodeShort("via-cuda", "via-cuda@16000");
+    macio->addNodeShort(pmuPlatform ? "via-pmu" : "via-cuda", viaName);
+	/*
+	 * PearPC routes host keyboard and mouse events through the CUDA/PMU ADB
+	 * packet interface.  Keep these compatibility nodes on PMU machines too;
+	 * the emulated OHCI controller does not yet provide USB HID devices.
+	 */
 	PromNode *adb = new PromNode("adb");
 	via->addNode(adb);
 	adb->addProp(new PromPropString("device_type", "adb"));
-	PromNode *keyboard = new PromNode("keyboard"); 
+	adb->addProp(new PromPropString("compatible", pmuPlatform ? "pmu-99" : "adb"));
+	adb->addProp(new PromPropInt("#address-cells", 1));
+	adb->addProp(new PromPropInt("#size-cells", 0));
+	PromNode *keyboard = new PromNode("keyboard");
 	adb->addNode(keyboard);
 	keyboard->addProp(new PromPropString("device_type", "keyboard"));
-	PromNode *mouse = new PromNode("mouse"); 
+	keyboard->addProp(new PromPropInt("reg", 2));
+	PromNode *mouse = new PromNode("mouse");
 	adb->addNode(mouse);
 	mouse->addProp(new PromPropString("device_type", "mouse"));
 	mouse->addProp(new PromPropInt("#buttons", 3));
 	mouse->addProp(new PromPropInt("reg", 3));
+	aliases->addProp(new PromPropString(
+	    "adb-keyboard", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/keyboard"
+	                                : "/pci@80000000/mac-io@5/via-cuda@16000/adb/keyboard"));
+	aliases->addProp(new PromPropString(
+	    "adb-mouse", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/mouse"
+	                             : "/pci@80000000/mac-io@5/via-cuda@16000/adb/mouse"));
 //	byte regmouse[] = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
 //	mouse->addProp(new PromPropMemory("reg", &regmouse, sizeof regmouse));
-	via->addProp(new PromPropString("compatible", "cuda"));
-	via->addProp(new PromPropString("device_type", "via-cuda"));
+	via->addProp(new PromPropString("compatible", pmuPlatform ? "pmu" : "cuda"));
+	via->addProp(new PromPropString("device_type", pmuPlatform ? "via-pmu" : "via-cuda"));
+    if (pmuPlatform) {
+        via->addProp(new PromPropInt("#address-cells", 1));
+        via->addProp(new PromPropInt("#size-cells", 0));
+        via->addProp(new PromPropInt("pmu-version", 0x00d0330c));
+    }
 
 	byte reg3[] = {0x00,0x01,0x60,0x00, 0x00,0x00,0x20,0x00};
 	via->addProp(new PromPropMemory("reg", &reg3, sizeof reg3));
 
-	via->addProp(new PromPropInt("interrupts", 0x12));
+	byte cudaInterrupt[] = {0, 0, 0, IO_PIC_IRQ_CUDA, 0, 0, 0, 1};
+	via->addProp(new PromPropMemory("interrupts", cudaInterrupt, sizeof cudaInterrupt));
 	via->addProp(new PromPropLink("interrupt-parent", pic->getPHandle()));
 	PromNode *rtc = new PromNode("rtc");
 	via->addNode(rtc);
 	rtc->addProp(new PromPropString("device_type", "rtc"));
-	PromNode *nvram = new PromNode("nvram@60000");
+    if (pmuPlatform) rtc->addProp(new PromPropString("compatible", "rtc,via-pmu"));
+	PromNode *nvram = new PromNodeNVRAM("nvram@60000");
 	macio->addNode(nvram);
 	macio->addNodeShort("nvram", "nvram@60000");
 	nvram->addProp(new PromPropString("device_type", "nvram"));
 	byte regnv[] = {0x00,0x06,0x00,0x00,0x00,0x02,0x00,0x00};
 	nvram->addProp(new PromPropMemory("reg", &regnv, sizeof regnv));
 	nvram->addProp(new PromPropInt("#bytes", 0x2000));
-	PromNode *powermgt = new PromNode("power-mgt");
-	macio->addNode(powermgt);
+	chosen->addProp(new PromPropInt("nvram", nvram->open("")));
+	PromNode *powermgt = new PromNodeOpen("power-mgt");
+    if (pmuPlatform) via->addNode(powermgt);
+    else macio->addNode(powermgt);
 	powermgt->addProp(new PromPropString("device_type", "power-mgt"));
-	powermgt->addProp(new PromPropString("compatible", "cuda"));
-	powermgt->addProp(new PromPropString("mgt-kind", "min-consumption-pwm-led"));
-	byte regmgt[] = {
-	0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
-	powermgt->addProp(new PromPropMemory("reg", &regmgt, sizeof regmgt));
+    if (pmuPlatform) {
+        powermgt->addProp(new PromPropString("compatible", "via-pmu-99"));
+        powermgt->addProp(new PromPropString("registry-name", "extint-gpio1"));
+        const byte primInfo[] = {
+            0x00,0x00,0x00,0xff, 0x00,0x00,0x00,0x2c, 0x00,0x03,0x0d,0x40,
+            0x00,0x01,0xe7,0x05, 0x00,0x00,0x34,0x00, 0x00,0x00,0x00,0x00,
+            0x00,0x00, 0x26,0x0d, 0x46,0x00,0x02,0x78, 0x78,0x3c,0x00
+        };
+        powermgt->addProp(new PromPropMemory("prim-info", primInfo, sizeof primInfo));
+    } else {
+        powermgt->addProp(new PromPropString("compatible", "cuda"));
+        powermgt->addProp(new PromPropString("mgt-kind", "min-consumption-pwm-led"));
+        byte regmgt[] = {
+        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
+        powermgt->addProp(new PromPropMemory("reg", &regmgt, sizeof regmgt));
+    }
 
 	/*
 	 *	Eth0

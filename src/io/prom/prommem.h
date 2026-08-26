@@ -28,6 +28,9 @@
 bool prom_get_string(String &result, uint32 ea);
 bool prom_claim_page(uint32 phys);
 bool prom_claim_pages(uint32 phys, uint32 size);
+void prom_map_free_identity_pages(uint32 end);
+void prom_map_identity_range(uint32 start, uint32 size);
+uint32 prom_allocate_virt(uint32 size, uint32 align=0);
 uint32 prom_allocate_mem(uint32 size, uint32 align=0, uint32 virt=0);
 bool prom_free_mem(uint32 virt);
 
@@ -41,4 +44,3 @@ bool prom_mem_init();
 bool prom_mem_done();
 
 #endif
-

@@ -141,6 +141,8 @@ struct PPC_CPU_State {
     // for altivec
     uint32 vscr;
     uint32 vrsave;
+    /* Thermal Assist Unit: THRM1/THRM2/THRM3 (SPR 1020-1022). */
+    uint32 thrm[3];
     uint32 vtemp;
     uint64 vtemp64;
     uint32 vfcw;

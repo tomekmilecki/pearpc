@@ -32,6 +32,8 @@
 #include "tools/snprintf.h"
 #include "debug/tracers.h"
 #include "io/prom/prom.h"
+#include "io/prom/prommem.h"
+#include "io/prom/promosi.h"
 #include "io/io.h"
 #include "ppc_cpu.h"
 #include "ppc_fpu.h"
@@ -155,6 +157,9 @@ uint32 gMemorySize;
 static inline void tlb_fill_data_read(PPC_CPU_State *cpu, uint32 ea, uint32 pa)
 {
     uint32 pa_page = pa & 0xFFFFF000;
+    if ((ea & 0xFFFFF000) == 0x008FC000) {
+        return;
+    }
     if (pa_page + 0x1000 <= gMemorySize) {
         uint32 idx = (ea >> 12) & (TLB_ENTRIES - 1);
         cpu->tlb_data_read_eff[idx] = ea & 0xFFFFF000;
@@ -165,6 +170,9 @@ static inline void tlb_fill_data_read(PPC_CPU_State *cpu, uint32 ea, uint32 pa)
 static inline void tlb_fill_data_write(PPC_CPU_State *cpu, uint32 ea, uint32 pa)
 {
     uint32 pa_page = pa & 0xFFFFF000;
+    if ((ea & 0xFFFFF000) == 0x008FC000) {
+        return;
+    }
     if (pa_page + 0x1000 <= gMemorySize) {
         uint32 idx = (ea >> 12) & (TLB_ENTRIES - 1);
         cpu->tlb_data_write_eff[idx] = ea & 0xFFFFF000;
@@ -236,6 +244,10 @@ extern "C" int ppc_read_effective_word_slow(PPC_CPU_State *cpu, uint32 ea)
         tlb_fill_data_read(cpu, ea, pa);
         uint32 result;
         ppc_read_physical_word(pa, result);
+        if (ea == 0x008FCF14) {
+            fprintf(stderr, "[TOC-READ] pc=%08x ea=%08x pa=%08x value=%08x r2=%08x\n", cpu->pc, ea, pa, result,
+                    cpu->gpr[2]);
+        }
         cpu->temp = result;
         return 0;
     }
@@ -277,6 +289,9 @@ extern "C" int ppc_write_effective_byte_slow(PPC_CPU_State *cpu, uint32 ea, uint
     uint32 pa;
     if (ppc_effective_to_physical(*cpu, ea, PPC_MMU_WRITE, pa) == PPC_MMU_OK) {
         tlb_fill_data_write(cpu, ea, pa);
+        if (ea >= 0x008FCF14 && ea < 0x008FCF18) {
+            fprintf(stderr, "[TOC-WRITE8] pc=%08x ea=%08x pa=%08x value=%02x\n", cpu->pc, ea, pa, data & 0xff);
+        }
         ppc_write_physical_byte(pa, data);
         return 0;
     }
@@ -300,6 +315,9 @@ extern "C" int ppc_write_effective_half_slow(PPC_CPU_State *cpu, uint32 ea, uint
     uint32 pa;
     if (ppc_effective_to_physical(*cpu, ea, PPC_MMU_WRITE, pa) == PPC_MMU_OK) {
         tlb_fill_data_write(cpu, ea, pa);
+        if (ea >= 0x008FCF12 && ea < 0x008FCF18) {
+            fprintf(stderr, "[TOC-WRITE16] pc=%08x ea=%08x pa=%08x value=%04x\n", cpu->pc, ea, pa, data & 0xffff);
+        }
         ppc_write_physical_half(pa, data);
         return 0;
     }
@@ -322,6 +340,9 @@ extern "C" int ppc_write_effective_word_slow(PPC_CPU_State *cpu, uint32 ea, uint
     uint32 pa;
     if (ppc_effective_to_physical(*cpu, ea, PPC_MMU_WRITE, pa) == PPC_MMU_OK) {
         tlb_fill_data_write(cpu, ea, pa);
+        if (ea >= 0x008FCF10 && ea < 0x008FCF18) {
+            fprintf(stderr, "[TOC-WRITE32] pc=%08x ea=%08x pa=%08x value=%08x\n", cpu->pc, ea, pa, data);
+        }
         ppc_write_physical_word(pa, data);
         return 0;
     }
@@ -344,6 +365,10 @@ extern "C" int ppc_write_effective_dword_slow(PPC_CPU_State *cpu, uint32 ea, uin
     uint32 pa;
     if (ppc_effective_to_physical(*cpu, ea, PPC_MMU_WRITE, pa) == PPC_MMU_OK) {
         tlb_fill_data_write(cpu, ea, pa);
+        if (ea < 0x008FCF18 && ea + sizeof(data) > 0x008FCF14) {
+            fprintf(stderr, "[TOC-WRITE64] pc=%08x ea=%08x pa=%08x value=%016llx\n", cpu->pc, ea, pa,
+                    (unsigned long long)data);
+        }
         ppc_write_physical_dword(pa, data);
         return 0;
     }
@@ -364,6 +389,24 @@ int FASTCALL ppc_effective_to_physical(PPC_CPU_State &aCPU, uint32 addr, int fla
 
     if (flags & PPC_MMU_CODE) {
         if (!(aCPU.msr & MSR_IR)) {
+            /*
+             * NewWorld BootX calls Open Firmware through the fixed
+             * real-mode client-interface vector.  The callback itself
+             * lives in PROM memory, so translate this one vector to its
+             * physical location while all other real-mode addresses stay
+             * identity-mapped.
+             */
+            if (addr == PROM_REAL_MODE_ENTRY && gPromOSIEntry) {
+                result = prom_mem_virt_to_phys(gPromOSIEntry);
+                return PPC_MMU_OK;
+            }
+            /* The NewWorld ROM is physically decoded in the top 4 MiB of
+             * the 32-bit address space.  Its toolbox image is mirrored at
+             * 0x00c00000 in PearPC's RAM backing store. */
+            if (addr >= 0xffc00000) {
+                result = 0x00c00000 + (addr - 0xffc00000);
+                return PPC_MMU_OK;
+            }
             result = addr;
             return PPC_MMU_OK;
         }
@@ -387,6 +430,10 @@ int FASTCALL ppc_effective_to_physical(PPC_CPU_State &aCPU, uint32 addr, int fla
         }
     } else {
         if (!(aCPU.msr & MSR_DR)) {
+            if (addr >= 0xffc00000) {
+                result = 0x00c00000 + (addr - 0xffc00000);
+                return PPC_MMU_OK;
+            }
             result = addr;
             return PPC_MMU_OK;
         }

@@ -24,7 +24,6 @@
 #include "tools/snprintf.h"
 #include "system/arch/sysendian.h"
 #include "cpu/cpu.h"
-#include "io/cuda/cuda.h"
 #include "pic.h"
 #include "debug/tracers.h"
 #include "system/systhread.h"
@@ -37,18 +36,178 @@ uint32 PIC_pending_level;
 
 sys_mutex PIC_mutex;
 
+static uint32 OpenPIC_ivpr[64];
+static uint32 OpenPIC_idr[64];
+static uint32 OpenPIC_ctpr;
+static uint32 OpenPIC_spurious;
+static bool OpenPIC_active;
+static int OpenPIC_inService;
+static int pmuInterruptDebugCount;
+
 static void pic_renew_interrupts()
 {
-	if (((PIC_pending_low | PIC_pending_level) & PIC_enable_low) || (PIC_pending_high & PIC_enable_high)) {
-//	if (PIC_pending_level & PIC_enable_low) {
+	/* Edge events raise the CPU when they arrive; only active level sources
+	 * must be reasserted after an enable or acknowledge register write. */
+	if (PIC_pending_level & PIC_enable_low) {
 		ppc_cpu_raise_ext_exception();	
 	} else {
 		ppc_cpu_cancel_ext_exception();
 	}
 }
 
+static bool openpic_pending(int intr)
+{
+	if (intr == OpenPIC_inService) return false;
+	if (intr < 32) return (PIC_pending_low & (1U << intr)) != 0;
+	return (PIC_pending_high & (1U << (intr - 32))) != 0;
+}
+
+static bool openpic_enabled(int intr)
+{
+	return intr >= 0 && intr < 64 && !(OpenPIC_ivpr[intr] & 0x80000000) &&
+	       ((OpenPIC_ivpr[intr] >> 16) & 0xf) > OpenPIC_ctpr;
+}
+
+static void openpic_renew_interrupts()
+{
+	for (int intr = 0; intr < 64; ++intr) {
+		if (openpic_pending(intr) && openpic_enabled(intr)) {
+			ppc_cpu_raise_ext_exception();
+			return;
+		}
+	}
+	ppc_cpu_cancel_ext_exception();
+}
+
+static void openpic_reset()
+{
+	for (int intr = 0; intr < 64; ++intr) {
+		OpenPIC_ivpr[intr] = 0xa0000000;
+		OpenPIC_idr[intr] = 0;
+	}
+	OpenPIC_ctpr = 0xf;
+	OpenPIC_spurious = 0xff;
+	OpenPIC_inService = -1;
+	PIC_enable_low = 0;
+	PIC_enable_high = 0;
+}
+
+static void openpic_write(uint32 addr, uint32 data, int size)
+{
+	uint32 reg = addr - IO_OPENPIC_PA_START;
+	OpenPIC_active = true;
+
+	if (reg == 0x1020) {
+		if (data & 0x80000000) openpic_reset();
+	} else if (reg == 0x10e0) {
+		OpenPIC_spurious = data & 0xff;
+	} else if (reg >= 0x10000 && reg < 0x10800) {
+		int intr = (reg & 0xffff) >> 5;
+		if (intr == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
+			fprintf(stderr, "[PMU-IRQ-DEBUG] write reg=%x data=%08x ctpr=%u\n", reg & 0x1f, data,
+			        OpenPIC_ctpr);
+			++pmuInterruptDebugCount;
+		}
+		switch (reg & 0x1f) {
+		case 0x00:
+			OpenPIC_ivpr[intr] = data;
+			if (intr < 32) {
+				if (data & 0x80000000) PIC_enable_low &= ~(1U << intr);
+				else PIC_enable_low |= 1U << intr;
+			} else {
+				if (data & 0x80000000) PIC_enable_high &= ~(1U << (intr - 32));
+				else PIC_enable_high |= 1U << (intr - 32);
+			}
+			break;
+		case 0x10:
+			OpenPIC_idr[intr] = data;
+			break;
+		}
+	} else if ((reg & 0x3f000) == 0x20000) {
+		switch (reg & 0xff0) {
+		case 0x80:
+			OpenPIC_ctpr = data & 0xf;
+			break;
+		case 0xb0:
+			OpenPIC_inService = -1;
+			break;
+		}
+	}
+	openpic_renew_interrupts();
+}
+
+static void openpic_read(uint32 addr, uint32 &data, int size)
+{
+	uint32 reg = addr - IO_OPENPIC_PA_START;
+	if (reg == 0x0000) {
+		data = 0xffffffff;
+	} else if (reg == 0x1000) {
+		data = 0x003f0002;
+	} else if (reg == 0x1020) {
+		data = 0;
+	} else if (reg == 0x1080 || reg == 0x1090) {
+		data = 0;
+	} else if (reg == 0x10e0) {
+		data = OpenPIC_spurious;
+	} else if (reg == 0x10f0) {
+		data = 4160000;
+	} else if (reg >= 0x10000 && reg < 0x10800) {
+		int intr = (reg & 0xffff) >> 5;
+		data = (reg & 0x10) ? OpenPIC_idr[intr] : OpenPIC_ivpr[intr];
+	} else if ((reg & 0x3f000) == 0x20000) {
+		switch (reg & 0xff0) {
+		case 0x80:
+			data = OpenPIC_ctpr;
+			break;
+		case 0x90:
+			data = 0;
+			break;
+		case 0xa0: {
+			int selected = -1;
+			int priority = -1;
+			for (int intr = 0; intr < 64; ++intr) {
+				int candidatePriority = (OpenPIC_ivpr[intr] >> 16) & 0xf;
+				if (openpic_pending(intr) && openpic_enabled(intr) && candidatePriority > priority) {
+					selected = intr;
+					priority = candidatePriority;
+				}
+			}
+			if (selected < 0) {
+				data = OpenPIC_spurious;
+			} else {
+				if (selected == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
+					fprintf(stderr, "[PMU-IRQ-DEBUG] iack ivpr=%08x idr=%08x pending=%08x\n",
+					        OpenPIC_ivpr[selected], OpenPIC_idr[selected], PIC_pending_high);
+					++pmuInterruptDebugCount;
+				}
+				data = OpenPIC_ivpr[selected] & 0xff;
+				OpenPIC_inService = selected;
+				if (!(OpenPIC_ivpr[selected] & 0x00400000) || selected == IO_PIC_IRQ_CUDA) {
+					if (selected < 32) {
+						PIC_pending_low &= ~(1U << selected);
+						PIC_pending_level &= ~(1U << selected);
+					}
+					else PIC_pending_high &= ~(1U << (selected - 32));
+				}
+			}
+			openpic_renew_interrupts();
+			break;
+		}
+		default:
+			data = 0;
+			break;
+		}
+	} else {
+		data = 0xffffffff;
+	}
+}
+
 void pic_write(uint32 addr, uint32 data, int size)
 {
+	if (addr >= IO_OPENPIC_PA_START && addr < IO_OPENPIC_PA_END) {
+		openpic_write(addr, data, size);
+		return;
+	}
 	IO_PIC_TRACE("write word @%08x: %08x (from %08x)\n", addr, data, ppc_cpu_get_pc(0));
 	addr -= IO_PIC_PA_START;
 	switch (addr) {
@@ -97,6 +256,10 @@ void pic_write(uint32 addr, uint32 data, int size)
 
 void pic_read(uint32 addr, uint32 &data, int size)
 {
+	if (addr >= IO_OPENPIC_PA_START && addr < IO_OPENPIC_PA_END) {
+		openpic_read(addr, data, size);
+		return;
+	}
 	IO_PIC_TRACE("read word @%08x (from %08x)\n", addr, ppc_cpu_get_pc(0));
 	addr -= IO_PIC_PA_START;
 	switch (addr) {
@@ -141,13 +304,6 @@ void pic_read(uint32 addr, uint32 &data, int size)
 
 void pic_raise_interrupt(int intr)
 {
-	if (intr == 18) {
-		static int cuda_raise_count = 0;
-		cuda_raise_count++;
-		if (cuda_raise_count <= 20 || cuda_raise_count % 1000 == 0) {
-			fprintf(stderr, "[PIC] CUDA raise #%d\n", cuda_raise_count);
-		}
-	}
 	sys_lock_mutex(PIC_mutex);
 	uint32 mask, pending;
 	int intr_;
@@ -161,12 +317,17 @@ void pic_raise_interrupt(int intr)
 		intr_ = intr;
 	}
 	uint32 ibit = 1 << intr_;
+	if (intr == IO_PIC_IRQ_PMU_EXTINT && pmuInterruptDebugCount < 40) {
+		fprintf(stderr, "[PMU-IRQ-DEBUG] raise active=%d ivpr=%08x ctpr=%u pending=%08x enable=%08x\n",
+		        OpenPIC_active, OpenPIC_ivpr[intr], OpenPIC_ctpr, PIC_pending_high, PIC_enable_high);
+		++pmuInterruptDebugCount;
+	}
 	bool level = false;
 	if (intr > 31) {
 		PIC_pending_high |= ibit;
 	} else {
 		PIC_pending_low |= ibit;
-		if (IO_PIC_LEVEL_TYPE & ibit) {
+		if (OpenPIC_active ? (OpenPIC_ivpr[intr] & 0x00400000) : (IO_PIC_LEVEL_TYPE & ibit)) {
 			PIC_pending_level |= ibit;
 			level = true;
 		}
@@ -178,8 +339,9 @@ void pic_raise_interrupt(int intr)
 	 *	level type:
 	 *	signal int if not masked and state high
 	 */
-	if ((mask & ibit) && 
-	    (level || !(pending & ibit))) {
+	bool deliver = OpenPIC_active ? (openpic_pending(intr) && openpic_enabled(intr)) : ((mask & ibit) &&
+	    (level || !(pending & ibit)));
+	if (deliver) {
 		IO_PIC_TRACE("*signal int: %d\n", intr);
 		ppc_cpu_raise_ext_exception();
 	} else {
@@ -198,7 +360,8 @@ void pic_cancel_interrupt(int intr)
 		PIC_pending_low &= ~(1<<intr);
 		PIC_pending_level &= ~(1<<intr);
 	}
-	pic_renew_interrupts();
+	if (OpenPIC_active) openpic_renew_interrupts();
+	else pic_renew_interrupts();
 	sys_unlock_mutex(PIC_mutex);
 }
 
@@ -208,6 +371,8 @@ void pic_init()
 	PIC_pending_high = 0;
 	PIC_enable_low = 0;
 	PIC_enable_high = 0;
+	OpenPIC_active = false;
+	openpic_reset();
 	sys_create_mutex(&PIC_mutex);
 }
 
@@ -219,4 +384,3 @@ void pic_done()
 void pic_init_config()
 {
 }
-

@@ -44,6 +44,26 @@ extern PPC_CPU_State *gCPU;
  * CPU state inline. The generated code checks the return value
  * of the interpreter function and dispatches to npc on exception.
  */
+struct ExcRingEntry {
+    uint32 type, pc, srr0, srr1, dar, dsisr, lr;
+    bool valid;
+};
+static const int kExcRingSize = 40;
+static ExcRingEntry gExcRing[kExcRingSize];
+static uint64 gExcRingPos = 0;
+
+extern "C" void ppc_exc_dump_ring()
+{
+    fprintf(stderr, "  --- last %d non-periodic exceptions (oldest first) ---\n", kExcRingSize);
+    uint64 start = gExcRingPos > (uint64)kExcRingSize ? gExcRingPos - kExcRingSize : 0;
+    for (uint64 i = start; i < gExcRingPos; i++) {
+        const ExcRingEntry &e = gExcRing[i % kExcRingSize];
+        if (!e.valid) continue;
+        fprintf(stderr, "  [EXC] type=%03x pc=%08x srr0=%08x srr1=%08x dar=%08x dsisr=%08x lr=%08x\n",
+                e.type, e.pc, e.srr0, e.srr1, e.dar, e.dsisr, e.lr);
+    }
+}
+
 bool FASTCALL ppc_exception(PPC_CPU_State &aCPU, uint32 type, uint32 flags, uint32 a)
 {
     // aCPU.pc must be set by the caller before ppc_exception() is
@@ -93,7 +113,11 @@ bool FASTCALL ppc_exception(PPC_CPU_State &aCPU, uint32 type, uint32 flags, uint
         break;
     case PPC_EXC_NO_VEC:
         aCPU.srr[0] = aCPU.pc;
-        aCPU.srr[1] = aCPU.msr & 0x0000ff73;
+        /* Same SRR1 mask as every other exception (and as the generic
+         * reference core).  The narrower mask used here previously dropped
+         * the high MSR bits -- MSR_VEC among them -- so the handler's rfi
+         * restored a truncated MSR. */
+        aCPU.srr[1] = aCPU.msr & 0x87c0ffff;
         break;
     case PPC_EXC_PROGRAM:
         aCPU.srr[0] = (flags & PPC_EXC_PROGRAM_NEXT) ? aCPU.npc : aCPU.pc;
@@ -117,6 +141,15 @@ bool FASTCALL ppc_exception(PPC_CPU_State &aCPU, uint32 type, uint32 flags, uint
     default:
         PPC_EXC_ERR("unknown\n");
         return false;
+    }
+    {
+        /* Temporary: keep the most recent non-periodic exceptions for crash dumps. */
+        if (type != PPC_EXC_DEC && type != PPC_EXC_EXT_INT) {
+            ExcRingEntry &e = gExcRing[gExcRingPos % kExcRingSize];
+            e.type = type; e.pc = aCPU.pc; e.srr0 = aCPU.srr[0]; e.srr1 = aCPU.srr[1];
+            e.dar = aCPU.dar; e.dsisr = aCPU.dsisr; e.lr = aCPU.lr; e.valid = true;
+            gExcRingPos++;
+        }
     }
     ppc_mmu_tlb_invalidate(aCPU);
     aCPU.msr = 0;

@@ -355,10 +355,9 @@ JITCFlow ppc_opc_gen_bcx(JITC &jitc)
         return flowContinue;
     }
 
-    // Fallback to interpreter for rare/complex cases:
-    // - LK=1 (branch-and-link conditional)
-    // - Both CTR decrement AND CR test
-    if (lk || (!ctr_ok_always && !cond_ok_always)) {
+    // CR-dependent branches must observe the architectural CR after helpers
+    // that update individual fields; deferred host flags are not sufficient.
+    if (lk || !cond_ok_always) {
         jitc.clobberFlags();
         ppc_opc_gen_interpret(jitc, ppc_opc_bcx);
         gen_dispatch_npc(jitc);
@@ -642,6 +641,7 @@ JITCFlow ppc_opc_gen_bclrx(JITC &jitc)
         jitc.clobberAll();
         // Must read old LR before overwriting
         jitc.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, lr));
+        jitc.asmANDw_val(W0, W0, 0xfffffffc);
         if (lk) {
             // blrl: new LR = ccb + pc + 4, then jump to old LR
             jitc.asmLDRw_cpu(W16, offsetof(PPC_CPU_State, current_code_base));
@@ -653,44 +653,7 @@ JITCFlow ppc_opc_gen_bclrx(JITC &jitc)
         return flowEndBlockUnreachable;
     }
 
-    // CR-only conditional bclr (no CTR decrement, no LK)
-    if (ctr_ok_always && !lk) {
-        jitc.clobberAll();
-
-        //  LDR W16, [X20, #cr]          ; 4
-        //  TBZ/TBNZ W16, #bit, not_taken ; 4  (skip dispatch)
-        //  LDR W0, [X20, #lr]           ; 4
-        //  AND W0, W0, #0xfffffffc      ; 4
-        //  <call stub_new_pc>           ; 8
-        // not_taken:
-        uint dispatch_size = 4 + 4 + JITC::asmCALL_cpu_size; // LDR + AND + call
-        uint total = 4 + 4 + dispatch_size;
-        jitc.emitAssure(total);
-
-        jitc.asmLDRw_cpu(W16, offsetof(PPC_CPU_State, cr));
-
-        int aarch64_bit = 31 - BI;
-        sint32 skip_offset = 4 + dispatch_size;
-
-        if (BO & 8) {
-            // Branch if CR bit SET → skip if CLEAR
-            jitc.asmTBZ(W16, aarch64_bit, skip_offset);
-        } else {
-            // Branch if CR bit CLEAR → skip if SET
-            jitc.asmTBNZ(W16, aarch64_bit, skip_offset);
-        }
-
-        NativeAddress not_taken = jitc.asmHERE() + dispatch_size;
-
-        jitc.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, lr));
-        jitc.asmANDw_val(W0, W0, 0xFFFFFFFC);
-        jitc.asmCALL_cpu(PPC_STUB_NEW_PC);
-
-        jitc.asmAssertHERE(not_taken, "bclrx_cr");
-        return flowContinue;
-    }
-
-    // Complex conditional bclr (CTR+CR, or LK) — fall back to interpreter
+    // Conditional bclr must use the architectural CR/CTR state.
     ppc_opc_gen_interpret(jitc, ppc_opc_bclrx);
     gen_dispatch_npc(jitc);
     return flowEndBlockUnreachable;
@@ -715,6 +678,7 @@ JITCFlow ppc_opc_gen_bcctrx(JITC &jitc)
             jitc.asmSTRw_cpu(W16, offsetof(PPC_CPU_State, lr));
         }
         jitc.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, ctr));
+        jitc.asmANDw_val(W0, W0, 0xfffffffc);
         jitc.asmCALL_cpu(PPC_STUB_NEW_PC);
         return flowEndBlockUnreachable;
     }
@@ -902,6 +866,11 @@ return flowContinue;
 /* mullw rD, rA, rB */
 JITCFlow ppc_opc_gen_mullwx(JITC &jitc)
 {
+    if (jitc.current_opc & PPC_OPC_OE) {
+        ppc_opc_gen_interpret(jitc, ppc_opc_mullwx);
+        return flowContinue;
+    }
+
     int rD, rA, rB;
     PPC_OPC_TEMPL_X(jitc.current_opc, rD, rA, rB);
     jitc.asmLDRw_cpu(W16, GPR_OFS(rA));
@@ -937,15 +906,8 @@ return flowContinue;
  */
 JITCFlow ppc_opc_gen_srwx(JITC &jitc)
 {
-    int rS, rA, rB;
-    PPC_OPC_TEMPL_X(jitc.current_opc, rS, rA, rB);
-    jitc.asmLDRw_cpu(W16, GPR_OFS(rS)); // X16 = zero-extend(gpr[rS])
-    jitc.asmLDRw_cpu(W17, GPR_OFS(rB));
-    jitc.asmANDw_val(W17, W17, 0x3F);
-    jitc.asmLSRV(X16, X16, X17);
-    jitc.asmSTRw_cpu(W16, GPR_OFS(rA)); // store low 32 bits
-        RC_UPDATE(W16);
-return flowContinue;
+    ppc_opc_gen_interpret(jitc, ppc_opc_srwx);
+    return flowContinue;
 }
 
 /*
@@ -996,8 +958,8 @@ JITCFlow ppc_opc_gen_rlwnmx(JITC &jitc)
         jitc.asmANDw(W16, W16, W17);
     }
     jitc.asmSTRw_cpu(W16, GPR_OFS(rA));
-        RC_UPDATE(W16);
-return flowContinue;
+    RC_UPDATE(W16);
+    return flowContinue;
 }
 
 /*
@@ -1404,29 +1366,8 @@ JITCFlow ppc_opc_gen_mfcr(JITC &jitc)
 /* mtcrf CRM, rS — Move To Condition Register Fields */
 JITCFlow ppc_opc_gen_mtcrf(JITC &jitc)
 {
-    jitc.clobberFlags(); // mtcrf reads+writes CR — flush and invalidate deferred flags
-    int rS;
-    uint32 crm;
-    PPC_OPC_TEMPL_XFX(jitc.current_opc, rS, crm);
-    // Build CRM mask: each bit in crm selects a 4-bit CR field
-    uint32 CRM = ((crm & 0x80) ? 0xf0000000 : 0) | ((crm & 0x40) ? 0x0f000000 : 0) | ((crm & 0x20) ? 0x00f00000 : 0) |
-                 ((crm & 0x10) ? 0x000f0000 : 0) | ((crm & 0x08) ? 0x0000f000 : 0) | ((crm & 0x04) ? 0x00000f00 : 0) |
-                 ((crm & 0x02) ? 0x000000f0 : 0) | ((crm & 0x01) ? 0x0000000f : 0);
-    if (CRM == 0xFFFFFFFF) {
-        // All fields — just copy
-        jitc.asmLDRw_cpu(W16, GPR_OFS(rS));
-        jitc.asmSTRw_cpu(W16, offsetof(PPC_CPU_State, cr));
-    } else {
-        // cr = (rS & CRM) | (cr & ~CRM)
-        jitc.asmLDRw_cpu(W16, GPR_OFS(rS));
-        jitc.asmLDRw_cpu(W17, offsetof(PPC_CPU_State, cr));
-        jitc.asmMOV(W0, CRM);
-        jitc.asmANDw(W16, W16, W0);
-        jitc.asmMOV(W0, ~CRM);
-        jitc.asmANDw(W17, W17, W0);
-        jitc.asmORRw(W16, W16, W17);
-        jitc.asmSTRw_cpu(W16, offsetof(PPC_CPU_State, cr));
-    }
+    jitc.clobberFlags();
+    ppc_opc_gen_interpret(jitc, ppc_opc_mtcrf);
     return flowContinue;
 }
 
@@ -1761,12 +1702,19 @@ int ppc_opc_addox(PPC_CPU_State &aCPU)
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
-    aCPU.gpr[rD] = aCPU.gpr[rA] + aCPU.gpr[rB];
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
+    uint32 a = aCPU.gpr[rA];
+    uint32 b = aCPU.gpr[rB];
+    uint32 result = a + b;
+    aCPU.gpr[rD] = result;
+    bool overflow = ((a ^ result) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        aCPU.xer |= XER_OV | XER_SO;
+    } else {
+        aCPU.xer &= ~XER_OV;
     }
-    // update XER flags
-    PPC_ALU_ERR("addox unimplemented\n");
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
+    }
     return 0;
 }
 
@@ -1796,13 +1744,19 @@ int ppc_opc_addcox(PPC_CPU_State &aCPU)
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
     uint32 a = aCPU.gpr[rA];
-    aCPU.gpr[rD] = a + aCPU.gpr[rB];
-    aCPU.xer_ca = (aCPU.gpr[rD] < a);
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
+    uint32 b = aCPU.gpr[rB];
+    uint32 result = a + b;
+    aCPU.gpr[rD] = result;
+    aCPU.xer_ca = (result < a);
+    bool overflow = ((a ^ result) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        aCPU.xer |= XER_OV | XER_SO;
+    } else {
+        aCPU.xer &= ~XER_OV;
     }
-    // update XER flags
-    PPC_ALU_ERR("addcox unimplemented\n");
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
+    }
     return 0;
 }
 
@@ -1836,13 +1790,19 @@ int ppc_opc_addeox(PPC_CPU_State &aCPU)
     uint32 a = aCPU.gpr[rA];
     uint32 b = aCPU.gpr[rB];
     uint32 ca = aCPU.xer_ca;
-    aCPU.gpr[rD] = a + b + ca;
+    uint32 result = a + b + ca;
+    aCPU.gpr[rD] = result;
     aCPU.xer_ca = ppc_carry_3(a, b, ca);
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
+
+    sint64 signedResult = (sint64)(sint32)a + (sint64)(sint32)b + ca;
+    if (signedResult > 0x7fffffffLL || signedResult < -0x80000000LL) {
+        aCPU.xer |= XER_OV | XER_SO;
+    } else {
+        aCPU.xer &= ~XER_OV;
     }
-    // update XER flags
-    PPC_ALU_ERR("addeox unimplemented\n");
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
+    }
     return 0;
 }
 
@@ -2384,7 +2344,12 @@ JITCFlow ppc_opc_gen_cror(JITC &jitc)   { return gen_cr_logical(jitc, 2); }
 JITCFlow ppc_opc_gen_crorc(JITC &jitc)  { return gen_cr_logical(jitc, 3); }
 JITCFlow ppc_opc_gen_crxor(JITC &jitc)  { return gen_cr_logical(jitc, 4); }
 JITCFlow ppc_opc_gen_crnand(JITC &jitc) { return gen_cr_logical(jitc, 5); }
-JITCFlow ppc_opc_gen_crnor(JITC &jitc)  { return gen_cr_logical(jitc, 6); }
+JITCFlow ppc_opc_gen_crnor(JITC &jitc)
+{
+    jitc.clobberFlags();
+    ppc_opc_gen_interpret(jitc, ppc_opc_crnor);
+    return flowContinue;
+}
 JITCFlow ppc_opc_gen_creqv(JITC &jitc)  { return gen_cr_logical(jitc, 7); }
 
 /* mcrf crD, crS — Move Condition Register Field
@@ -2442,18 +2407,18 @@ int ppc_opc_divwox(PPC_CPU_State &aCPU)
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
-    if (!aCPU.gpr[rB]) {
-        PPC_ALU_WARN("division by zero\n");
+    sint32 dividend = (sint32)aCPU.gpr[rA];
+    sint32 divisor = (sint32)aCPU.gpr[rB];
+    bool overflow = divisor == 0 || (dividend == (sint32)0x80000000 && divisor == -1);
+    if (overflow) {
+        aCPU.xer |= XER_OV | XER_SO;
     } else {
-        sint32 a = aCPU.gpr[rA];
-        sint32 b = aCPU.gpr[rB];
-        aCPU.gpr[rD] = a / b;
+        aCPU.gpr[rD] = dividend / divisor;
+        aCPU.xer &= ~XER_OV;
     }
     if (aCPU.current_opc & PPC_OPC_Rc) {
         ppc_update_cr0(aCPU, aCPU.gpr[rD]);
     }
-    // update XER flags
-    PPC_ALU_ERR("divwox unimplemented\n");
     return 0;
 }
 
@@ -2485,16 +2450,16 @@ int ppc_opc_divwuox(PPC_CPU_State &aCPU)
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
-    if (!aCPU.gpr[rB]) {
-        PPC_ALU_WARN("division by zero @%08x\n", aCPU.pc);
+    bool overflow = aCPU.gpr[rB] == 0;
+    if (overflow) {
+        aCPU.xer |= XER_OV | XER_SO;
     } else {
         aCPU.gpr[rD] = aCPU.gpr[rA] / aCPU.gpr[rB];
+        aCPU.xer &= ~XER_OV;
     }
     if (aCPU.current_opc & PPC_OPC_Rc) {
         ppc_update_cr0(aCPU, aCPU.gpr[rD]);
     }
-    // update XER flags
-    PPC_ALU_ERR("divwuox unimplemented\n");
     return 0;
 }
 
@@ -2613,13 +2578,19 @@ int ppc_opc_mullwx(PPC_CPU_State &aCPU)
 {
     int rD, rA, rB;
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
-    aCPU.gpr[rD] = aCPU.gpr[rA] * aCPU.gpr[rB];
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
-    }
+    sint64 product = (sint64)(sint32)aCPU.gpr[rA] * (sint64)(sint32)aCPU.gpr[rB];
+    uint32 result = (uint32)product;
+    aCPU.gpr[rD] = result;
     if (aCPU.current_opc & PPC_OPC_OE) {
-        // update XER flags
-        PPC_ALU_ERR("mullwox unimplemented\n");
+        bool overflow = product != (sint64)(sint32)result;
+        if (overflow) {
+            aCPU.xer |= XER_OV | XER_SO;
+        } else {
+            aCPU.xer &= ~XER_OV;
+        }
+    }
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
     }
     return 0;
 }
@@ -2964,13 +2935,18 @@ int ppc_opc_subfcox(PPC_CPU_State &aCPU)
     PPC_OPC_TEMPL_XO(aCPU.current_opc, rD, rA, rB);
     uint32 a = aCPU.gpr[rA];
     uint32 b = aCPU.gpr[rB];
-    aCPU.gpr[rD] = ~a + b + 1;
+    uint32 result = ~a + b + 1;
+    aCPU.gpr[rD] = result;
     aCPU.xer_ca = ppc_carry_3(~a, b, 1);
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
+    bool overflow = ((b ^ a) & (b ^ result) & 0x80000000) != 0;
+    if (overflow) {
+        aCPU.xer |= XER_OV | XER_SO;
+    } else {
+        aCPU.xer &= ~XER_OV;
     }
-    // update XER flags
-    PPC_ALU_ERR("subfcox unimplemented\n");
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
+    }
     return 0;
 }
 
@@ -3004,13 +2980,19 @@ int ppc_opc_subfeox(PPC_CPU_State &aCPU)
     uint32 a = aCPU.gpr[rA];
     uint32 b = aCPU.gpr[rB];
     uint32 ca = aCPU.xer_ca;
-    aCPU.gpr[rD] = ~a + b + ca;
-    aCPU.xer_ca = (ppc_carry_3(~a, b, ca));
-    if (aCPU.current_opc & PPC_OPC_Rc) {
-        ppc_update_cr0(aCPU, aCPU.gpr[rD]);
+    uint32 result = ~a + b + ca;
+    aCPU.gpr[rD] = result;
+    aCPU.xer_ca = ppc_carry_3(~a, b, ca);
+
+    sint64 signedResult = (sint64)(sint32)b - (sint64)(sint32)a - (ca ? 0 : 1);
+    if (signedResult > 0x7fffffffLL || signedResult < -0x80000000LL) {
+        aCPU.xer |= XER_OV | XER_SO;
+    } else {
+        aCPU.xer &= ~XER_OV;
     }
-    // update XER flags
-    PPC_ALU_ERR("subfeox unimplemented\n");
+    if (aCPU.current_opc & PPC_OPC_Rc) {
+        ppc_update_cr0(aCPU, result);
+    }
     return 0;
 }
 
@@ -3282,9 +3264,6 @@ int ppc_opc_bclrx(PPC_CPU_State &aCPU)
             aCPU.lr = aCPU.pc + 4;
         }
         aCPU.npc = BD;
-        if (aCPU.lr & 3) {
-            fprintf(stderr, "[BCLRX-ALIGN] LR=%08x not aligned! pc=%08x npc=%08x\n", aCPU.lr, aCPU.pc, BD);
-        }
         if (BD >= 0xBF000000 && BD < 0xC0000000) {
             PPC_ALU_ERR("BCLRX PROM dispatch: npc=%08x lr=%08x pc=%08x msr=%08x\n", BD, aCPU.lr, aCPU.pc, aCPU.msr);
         }
@@ -3511,11 +3490,6 @@ int ppc_opc_mfspr(PPC_CPU_State &aCPU)
         case 22: {
             readDEC(aCPU);
             aCPU.gpr[rD] = aCPU.dec;
-            static int rc = 0;
-            rc++;
-            if (rc <= 100 || rc % 1000 == 0) {
-                fprintf(stderr, "[SPR] mfspr DEC #%d: dec=%08x pc=%08x\n", rc, aCPU.dec, aCPU.pc);
-            }
             return 0;
         }
         case 25: aCPU.gpr[rD] = aCPU.sdr1; return 0;
@@ -3588,16 +3562,33 @@ int ppc_opc_mfspr(PPC_CPU_State &aCPU)
             aCPU.gpr[rD] = 0;
             return 0;
         case 28:
-            //			PPC_OPC_WARN("read from spr %d:%d (THRM1) not supported!\n", spr1, spr2);
-            aCPU.gpr[rD] = 0;
-            return 0;
         case 29:
-            //			PPC_OPC_WARN("read from spr %d:%d (THRM2) not supported!\n", spr1, spr2);
-            aCPU.gpr[rD] = 0;
+            /*
+             * THRM1/THRM2 (SPR 1020/1021), the 750/7400 Thermal Assist Unit.
+             * Mac OS scans the THRES field looking for the point at which the
+             * junction temperature crosses it, and spins on TIV until the
+             * comparison is reported valid.  Returning 0 forever hangs startup.
+             *
+             *   V    = 0x00000001  threshold comparison enabled
+             *   THRES= 0x3f800000  threshold, degrees C, bits 23-29
+             *   TID  = 0x20000000  0: TIN set when temp > THRES, 1: when below
+             *   TIV  = 0x40000000  comparison result is valid
+             *   TIN  = 0x80000000  the threshold was crossed
+             */
+            {
+                uint32 v = aCPU.thrm[spr1 - 28];
+                if (v & PPC_THRM_V) {
+                    uint32 thres = (v & PPC_THRM_THRES) >> 23;
+                    bool above = PPC_THRM_JUNCTION_TEMP > thres;
+                    bool tin = (v & PPC_THRM_TID) ? !above : above;
+                    v |= PPC_THRM_TIV;
+                    if (tin) v |= PPC_THRM_TIN; else v &= ~PPC_THRM_TIN;
+                }
+                aCPU.gpr[rD] = v;
+            }
             return 0;
         case 30:
-            //			PPC_OPC_WARN("read from spr %d:%d (THRM3) not supported!\n", spr1, spr2);
-            aCPU.gpr[rD] = 0;
+            aCPU.gpr[rD] = aCPU.thrm[2];
             return 0;
         case 31:
             //			PPC_OPC_WARN("read from spr %d:%d (???) not supported!\n", spr1, spr2);
@@ -3813,11 +3804,6 @@ int ppc_opc_mtspr(PPC_CPU_State &aCPU)
             /*		case 18: aCPU.gpr[rD] = aCPU.dsisr; return 0;
 		case 19: aCPU.gpr[rD] = aCPU.dar; return 0;*/
         case 22: {
-            static int wc = 0;
-            wc++;
-            if (wc <= 100 || wc % 1000 == 0) {
-                fprintf(stderr, "[SPR] mtspr DEC #%d: val=%08x pc=%08x\n", wc, aCPU.gpr[rS], aCPU.pc);
-            }
             writeDEC(aCPU, aCPU.gpr[rS]);
             return 0;
         }
@@ -3931,17 +3917,15 @@ int ppc_opc_mtspr(PPC_CPU_State &aCPU)
             return 0;
         case 18: PPC_OPC_ERR("write(%08x) to spr %d:%d (IABR) not supported!\n", aCPU.gpr[rS], spr1, spr2); return 0;
         case 21: PPC_OPC_ERR("write(%08x) to spr %d:%d (DABR) not supported!\n", aCPU.gpr[rS], spr1, spr2); return 0;
-        case 22: PPC_OPC_ERR("write(%08x) to spr %d:%d (?) not supported!\n", aCPU.gpr[rS], spr1, spr2); return 0;
-        case 23: PPC_OPC_ERR("write(%08x) to spr %d:%d (?) not supported!\n", aCPU.gpr[rS], spr1, spr2); return 0;
+        /* The Mac OS nanokernel clears these implementation-specific G4 SPRs. */
+        case 22: return 0;
+        case 23: return 0;
         case 27: PPC_OPC_WARN("write(%08x) to spr %d:%d (ICTC) not supported!\n", aCPU.gpr[rS], spr1, spr2); return 0;
         case 28:
-            //			PPC_OPC_WARN("write(%08x) to spr %d:%d (THRM1) not supported!\n", aCPU.gpr[rS], spr1, spr2);
-            return 0;
         case 29:
-            //			PPC_OPC_WARN("write(%08x) to spr %d:%d (THRM2) not supported!\n", aCPU.gpr[rS], spr1, spr2);
-            return 0;
         case 30:
-            //			PPC_OPC_WARN("write(%08x) to spr %d:%d (THRM3) not supported!\n", aCPU.gpr[rS], spr1, spr2);
+            /* THRM1/THRM2/THRM3 -- see the read side for the bit layout. */
+            aCPU.thrm[spr1 - 28] = aCPU.gpr[rS];
             return 0;
         case 31: return 0;
         }

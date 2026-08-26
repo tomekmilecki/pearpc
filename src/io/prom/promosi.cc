@@ -31,6 +31,7 @@
 #include "promosi.h"
 
 uint32 gPromOSIEntry;
+uint32 gPromRTASEntry;
 
 void prom_service_start_cpu(prom_args *pa)
 {
@@ -453,7 +454,8 @@ void prom_service_claim(prom_args *pa)
 void prom_service_release(prom_args *pa)
 {
 	//; of_release(void *virt, int size)
-	IO_PROM_ERR("release()\n");
+	/* Allocations are retained for the duration of the firmware session. */
+	IO_PROM_TRACE("release(%08x, %08x)\n", pa->args[0], pa->args[1]);
 }
 void prom_service_boot(prom_args *pa)
 {
@@ -691,4 +693,24 @@ ok:
 	ppc_cpu_set_gpr(0, 3, 0);
 	// return
 //	gCPU.npc = gCPU.lr;
+}
+
+void call_prom_rtas()
+{
+	uint32 args = ppc_cpu_get_gpr(0, 3);
+	uint32 phys;
+	uint32 nargs;
+	if (!ppc_prom_effective_to_physical(phys, args)
+	    || !ppc_dma_read(&nargs, phys + 4, sizeof nargs)) {
+		IO_PROM_ERR("can't read RTAS arguments at %08x\n", args);
+		return;
+	}
+	nargs = ppc_word_from_BE(nargs);
+
+	/* The compatibility RTAS accepts the services advertised in /rtas. */
+	uint32 status = ppc_word_to_BE(0);
+	if (!ppc_dma_write(phys + 12 + nargs * sizeof(uint32), &status, sizeof status)) {
+		IO_PROM_ERR("can't write RTAS status at %08x\n", args);
+	}
+	ppc_cpu_set_gpr(0, 3, 0);
 }

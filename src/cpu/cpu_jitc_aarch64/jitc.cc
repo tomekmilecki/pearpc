@@ -27,6 +27,8 @@
 #include "cpu/ppc_liveness.h"
 #include "cpu/ppc_semantics_dispatch.h"
 
+extern "C" void ppc_exc_dump_ring();
+
 byte *gTranslationCacheBase = NULL;
 extern void jitc_dump_and_exit(int code);
 
@@ -960,7 +962,72 @@ static uint64 jitcHits = 0, jitcNewTranslations = 0, jitcNewEntries = 0;
 
 extern "C" NativeAddress jitcNewPC(JITC &jitc, uint32 entry)
 {
+    extern PPC_CPU_State *gCPU;
     traceInit();
+    struct DispatchHistory {
+        uint32 entry;
+        uint32 pc;
+        uint32 npc;
+        uint32 codeBase;
+        uint32 opcode;
+        uint32 lr;
+        uint32 ctr;
+        uint32 r0;
+        uint32 r1;
+    };
+    static DispatchHistory history[32];
+    static uint32 historyPosition;
+    if (entry >= 0x0005f000 && entry < 0x0005f300) {
+        fprintf(stderr, "[LOW-DISPATCH] target=%08x history follows\n", entry);
+        for (uint32 i = 0; i < 32; ++i) {
+            const DispatchHistory &h = history[(historyPosition + i) & 31];
+            fprintf(stderr,
+                    "  [%02u] pa=%08x pc=%08x npc=%08x ccb=%08x opc=%08x lr=%08x ctr=%08x r0=%08x r1=%08x\n",
+                    i, h.entry, h.pc, h.npc, h.codeBase, h.opcode, h.lr, h.ctr, h.r0, h.r1);
+        }
+    }
+    history[historyPosition] = {entry, gCPU->pc, gCPU->npc, gCPU->current_code_base, gCPU->current_opc,
+                                gCPU->lr, gCPU->ctr, gCPU->gpr[0], gCPU->gpr[1]};
+    historyPosition = (historyPosition + 1) & 31;
+    if (entry >= gMemorySize) {
+        fprintf(stderr, "[INVALID-DISPATCH] target=%08x history follows\n", entry);
+        for (uint32 i = 0; i < 32; ++i) {
+            const DispatchHistory &h = history[(historyPosition + i) & 31];
+            fprintf(stderr,
+                    "  [%02u] pa=%08x pc=%08x npc=%08x ccb=%08x opc=%08x lr=%08x ctr=%08x r0=%08x r1=%08x\n",
+                    i, h.entry, h.pc, h.npc, h.codeBase, h.opcode, h.lr, h.ctr, h.r0, h.r1);
+        }
+    }
+    if (entry == 0x00f272e0 || entry == 0x00f27534) {
+        extern PPC_CPU_State *gCPU;
+        extern byte *gMemory;
+        static uint32 debuggerTraceCount = 0;
+        if (debuggerTraceCount < 8) {
+            auto readPhysicalWord = [](uint32 address) {
+                if (address > gMemorySize - sizeof(uint32)) {
+                    return 0xffffffffU;
+                }
+                return ppc_word_from_BE(*(uint32 *)(gMemory + address));
+            };
+            uint32 sp = gCPU->gpr[1];
+            fprintf(stderr,
+                "[NK-DEBUG] pa=%08x pc=%08x msr=%08x cr=%08x lr=%08x ctr=%08x "
+                "r1=%08x r8=%08x r28=%08x r29=%08x sprg=%08x/%08x/%08x/%08x "
+                "srr=%08x/%08x dar=%08x dsisr=%08x\n",
+                entry, gCPU->pc, gCPU->msr, gCPU->cr, gCPU->lr, gCPU->ctr, sp, gCPU->gpr[8], gCPU->gpr[28],
+                gCPU->gpr[29], gCPU->sprg[0], gCPU->sprg[1], gCPU->sprg[2], gCPU->sprg[3], gCPU->srr[0],
+                gCPU->srr[1], gCPU->dar, gCPU->dsisr);
+            fprintf(stderr,
+                "[NK-FRAME] sp-4=%08x sp-0b30=%08x sp-0af0=%08x "
+                "sp+700=%08x +704=%08x +780=%08x +794=%08x +798=%08x +79c=%08x +7b4=%08x +7b8=%08x "
+                "+904=%08x\n",
+                readPhysicalWord(sp - 4), readPhysicalWord(sp - 0xb30), readPhysicalWord(sp - 0xaf0),
+                readPhysicalWord(sp + 0x700), readPhysicalWord(sp + 0x704), readPhysicalWord(sp + 0x780),
+                readPhysicalWord(sp + 0x794), readPhysicalWord(sp + 0x798), readPhysicalWord(sp + 0x79c),
+                readPhysicalWord(sp + 0x7b4), readPhysicalWord(sp + 0x7b8), readPhysicalWord(sp + 0x904));
+            debuggerTraceCount++;
+        }
+    }
     // Log EA→PA mapping for kernel-range addresses
     {
         extern PPC_CPU_State *gCPU;
@@ -1008,8 +1075,31 @@ extern "C" NativeAddress jitcNewPC(JITC &jitc, uint32 entry)
         lastEntry = entry;
     }
     if (total % 10000000 == 0) {
-        fprintf(stderr, "[JITC] %llu dispatches: hits=%llu newTrans=%llu newEntry=%llu\n", total, jitcHits,
-                jitcNewTranslations, jitcNewEntries);
+        fprintf(stderr,
+                "[JITC] %llu dispatches: hits=%llu newTrans=%llu newEntry=%llu "
+                "pa=%08x pc=%08x lr=%08x ctr=%08x r1=%08x r3=%08x dec=%08x\n",
+                total, jitcHits, jitcNewTranslations, jitcNewEntries, entry, gCPU->pc,
+                gCPU->lr, gCPU->ctr, gCPU->gpr[1], gCPU->gpr[3], gCPU->dec);
+    }
+    /*
+     * Temporary: Mac OS records the system error number in DSErrCode, a 68k
+     * low-memory global that lives at physical 0x4000 + 0x0AF0.  Poll it so we
+     * can dump the fault history from just before the guest gave up.
+     */
+    if ((total % 1000000) == 0) {
+        static bool dsSeen = false;
+        if (!dsSeen) {
+            uint32 w;
+            uint32 ds = w >> 16;
+            if (ppc_read_physical_word(0x4af0, w) == 0 && (ds = (w >> 16)) != 0 && ds < 0x100) {
+                dsSeen = true;
+                fprintf(stderr, "\n*** [DSERR] DSErrCode=%u at dispatch %llu  pc=%08x lr=%08x "
+                        "ctr=%08x r1=%08x msr=%08x\n", ds, total, gCPU->pc, gCPU->lr,
+                        gCPU->ctr, gCPU->gpr[1], gCPU->msr);
+                ppc_exc_dump_ring();
+                fflush(stderr);
+            }
+        }
     }
     if (gTraceLog) {
         gTraceCount++;

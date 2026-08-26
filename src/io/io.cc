@@ -52,7 +52,6 @@ extern "C" uint32 FASTCALL io_mem_read_glue(uint32 addr, int size)
 extern "C" void FASTCALL io_mem_write_glue(uint32 addr, uint32 data, int size)
 {
 //	gCPU.pc = gCPU.current_code_base + gCPU.pc_ofs;
-
 //	io_mem_write(addr, data, size);
 
 	if (addr >= IO_GCARD_FRAMEBUFFER_PA_START && addr < IO_GCARD_FRAMEBUFFER_PA_END) {
@@ -63,7 +62,8 @@ extern "C" void FASTCALL io_mem_write_glue(uint32 addr, uint32 data, int size)
 		pci_write(addr, data, size);
 		return;
 	}
-	if (addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) {
+	if ((addr >= IO_PIC_PA_START && addr < IO_PIC_PA_END) ||
+	    (addr >= IO_OPENPIC_PA_START && addr < IO_OPENPIC_PA_END)) {
 		pic_write(addr, data, size);
 		return;
 	}

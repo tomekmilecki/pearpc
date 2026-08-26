@@ -31,6 +31,8 @@
 #include "tools/snprintf.h"
 #include "debug/tracers.h"
 #include "io/prom/prom.h"
+#include "io/prom/prommem.h"
+#include "io/prom/promosi.h"
 #include "io/io.h"
 #include "ppc_cpu.h"
 #include "ppc_fpu.h"
@@ -72,6 +74,14 @@ inline int FASTCALL ppc_effective_to_physical(uint32 addr, int flags, uint32 &re
 {
 	if (flags & PPC_MMU_CODE) {
 		if (!(gCPU.msr & MSR_IR)) {
+			if (addr == PROM_REAL_MODE_ENTRY && gPromOSIEntry) {
+				result = prom_mem_virt_to_phys(gPromOSIEntry);
+				return PPC_MMU_OK;
+			}
+			if (addr >= 0xffc00000) {
+				result = 0x00c00000 + (addr - 0xffc00000);
+				return PPC_MMU_OK;
+			}
 			result = addr;
 			return PPC_MMU_OK;
 		}
@@ -100,6 +110,10 @@ inline int FASTCALL ppc_effective_to_physical(uint32 addr, int flags, uint32 &re
 		}
 	} else {
 		if (!(gCPU.msr & MSR_DR)) {
+			if (addr >= 0xffc00000) {
+				result = 0x00c00000 + (addr - 0xffc00000);
+				return PPC_MMU_OK;
+			}
 			result = addr;
 			return PPC_MMU_OK;
 		}
@@ -595,6 +609,16 @@ inline int FASTCALL ppc_read_effective_half(uint32 addr, uint16 &result)
 
 inline int FASTCALL ppc_read_effective_byte(uint32 addr, uint8 &result)
 {
+	if (addr == 0x80817600) {
+		static unsigned traceCount = 0;
+		if (traceCount++ < 64) {
+			fprintf(stderr,
+				"[ACR-BCLR-GENERIC] pc=%08x cr=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x "
+				"r24=%08x r27=%08x lr=%08x\n",
+				ppc_cpu_get_pc(0), gCPU.cr, gCPU.gpr[3], gCPU.gpr[4], gCPU.gpr[5], gCPU.gpr[6], gCPU.gpr[7],
+				gCPU.gpr[24], gCPU.gpr[27], gCPU.lr);
+		}
+	}
 	uint32 p;
 	int r;
 	if (!((r = ppc_effective_to_physical(addr, PPC_MMU_READ, p)))) {

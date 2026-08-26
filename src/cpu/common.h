@@ -189,7 +189,16 @@ msr: .83
 //#define PPC_CPU_UNSUPPORTED_MSR_BITS (/*MSR_POW|*/MSR_ILE|MSR_BE|MSR_IP|MSR_LE)
 #define PPC_CPU_UNSUPPORTED_MSR_BITS (~(MSR_POW | MSR_UNKNOWN | MSR_UNKNOWN2 | MSR_VEC | MSR_EE | MSR_PR | MSR_FP | MSR_ME | MSR_FE0 | MSR_SE | MSR_FE1 | MSR_IR | MSR_DR | MSR_RI))
 
-#define MSR_RFI_SAVE_MASK (0x87c0ff73) // was ff73
+/* Thermal Assist Unit, THRM1/THRM2 (SPR 1020/1021) on 750/7400. */
+#define PPC_THRM_V            0x00000001
+#define PPC_THRM_THRES        0x3f800000
+#define PPC_THRM_TID          0x20000000
+#define PPC_THRM_TIV          0x40000000
+#define PPC_THRM_TIN          0x80000000
+/* Reported junction temperature in degrees C. */
+#define PPC_THRM_JUNCTION_TEMP 40
+
+#define MSR_RFI_SAVE_MASK (0x87c0ffff) // rfi restores SRR1 bits 0, 5-9, 16-31
 
 /*
 BAT Register: .88
