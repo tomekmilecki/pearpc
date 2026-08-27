@@ -25,9 +25,11 @@ pci_ide0_slave_installed = 0
 pci_3c90x_installed = 0
 pci_rtl8139_installed = 0
 pci_usb_installed = 1
+pci_usb_hid = 1
 pci_serial_installed = 0
 pci_macio_pmu = 1
 
 nvram_file = "nvram.mac9"
 framebuffer_dump_file = "/tmp/pearpc-generic-framebuffer.raw"
 memdump_file = "/tmp/pearpc-memory.raw"
+prom_driver_usb = "usbohci.ndrv"

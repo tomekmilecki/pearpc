@@ -616,6 +616,333 @@ same error, same dispatch count, same framebuffer.
 
 ---
 
+## 4d. Mouse and keyboard input (open)
+
+Input does not work.  The host half is fixed and proven; the guest half is not.
+
+### A fast harness — do not reboot per experiment
+
+Rebooting to test one hypothesis costs ~10 minutes and roughly half of boots die to
+the intermittent JIT fault (§3).  Instead keep **one** instance alive and probe it:
+
+- `kill -USR2 <pid>` injects synthetic motion plus a keypress straight into the
+  CUDA/PMU queue, bypassing SDL and the mouse-grab gate.
+- The same handler reads Mac OS's own globals with `ppc_dma_read()` and prints
+  them, so no memory dump and no kill is needed.
+- It also cycles the packet encoding, so **one boot tests four variants**.
+
+```
+[PROBE] variant=1 RawMouse v=15 h=15 KeyMap=00000000 | queued=1 delivered=115 \
+        gpioReads=0 intBits=14 mask=90 asserted=1
+```
+
+That turned a 40-minute sweep into 35 seconds.  Note the guest reaches a usable
+Toolbox around 50,000 entry points — you do **not** need the login screen to test
+input, which also dodges the late-boot crash.
+
+### Host side: fixed
+
+- `SDLSystemDisplay::setMouseGrab()` only *confined* the pointer.  The guest is
+  driven by relative deltas, and a confined pointer stops producing them at the
+  window edge.  Now also sets `SDL_SetWindowRelativeMouseMode()`.
+- SDL3 reports `xrel`/`yrel` as **float** (they were `Sint32` in SDL2).  Truncating
+  each event discarded every sub-pixel delta, so a **trackpad** produced no motion
+  at all while a mouse mostly worked.  Deltas are now accumulated across events,
+  and an event that rounds to (0,0) is dropped rather than spending the PMU's
+  single ADB reply slot.
+- Motion events had `x` and `y` transposed.
+
+### Guest side: Mac OS receives the packets and discards them
+
+Proven with counters, not inference:
+
+- `delivered` increments on **every** probe (and was already >100 from boot), so
+  Mac OS collects each packet via `PMU_INT_ACK`.
+- `mask=90` — `PMU_INT_ADB` is unmasked; `asserted=1` — the interrupt is raised.
+- `RawMouse` never leaves its startup value of `(15,15)`.
+
+The low-memory base is confirmed each run by two globals whose values are
+predictable: `CrsrPin` (0x834) must equal the screen bounds, and `ScrnBase`
+(0x824) must equal `0x84000000`, PearPC's framebuffer address.  Both match, so
+the reads are real.
+
+### Ruled out
+
+| Hypothesis | Result |
+|---|---|
+| Wrong ADB device address | No — enumeration assigns keyboard 2 / mouse 3, and `mouseaddr`/`keybaddr` agree |
+| Wrong packet encoding | No — all four of `[0x3c,dy,dx]` and `[1,3,0x3c,dy,dx]`, each with and without `PMU_INT_ADB_AUTO`, are ignored |
+| Mouse-specific bug | No — injected **keypresses** are ignored too (`KeyMap` stays all zeros) |
+| Mac OS prefers USB HID | No — disabling `USB Device Extension` + `USB Software Locator` in the guest does **not** make it fall back to ADB |
+| Autopoll gating in our code | No — `gCUDA.autopoll` is written but never read, so it gates nothing |
+
+Mac OS also never polls the bus: after enumeration there are **zero** ADB requests,
+and `gpioReads=0` (it never reads the PMU interrupt GPIO).  It never sends the
+Linux-style autopoll enable (`PMU_ADB_CMD` with `0x86`) either.
+
+### Two real gaps found on the way
+
+- `pmu_adb_request()` never answered **Talk register 0** — the register carrying
+  mouse movement — for any device; it fell through to "no data".  Implemented,
+  along with pending-movement accumulation so motion is not lost while a reply is
+  outstanding.  Correct behaviour, but Mac OS does not use this path.
+- PearPC's USB is an **OHCI host-controller shell**: root-hub registers only, no
+  device descriptors, no HID class, no attached devices.  A real G4 Cube has no
+  ADB port at all — its keyboard and mouse are USB — so faithful input ultimately
+  needs USB HID emulation on the root hub.
+
+Do not simply remove the USB controller: `pci_usb_installed = 0` stalls the boot
+at ~17,000 entry points, before Mac OS starts.
+
+### Next steps
+
+Either disassemble the guest's ADB/PMU driver to find what it requires before it
+will dispatch received data, or implement a USB HID mouse on the emulated OHCI
+root hub.  Three PMU commands remain unimplemented and are the cheapest lead:
+
+```
+cmd=8e len=5 payload: 00 ff ff ff ff     <- mask-shaped, looks like event/poll config
+cmd=80 len=4 payload: e6 b5 97 f9
+cmd=82 len=0
+```
+
+---
+
+## 4e. USB HID: implemented, but the guest never enumerates it (open)
+
+A G4 Cube's keyboard and mouse are USB, so this is the path that should work.
+The device side is written and the host controller now has a transfer engine;
+what is missing is the guest bringing up the root hub port.
+
+### What was added
+
+`src/io/usb/usbhid.{cc,h}` -- boot-protocol mouse and keyboard: descriptors
+(device, configuration, interface, HID, endpoint, and both report descriptors),
+the standard requests, the HID class requests, interrupt-IN reports with
+movement accumulation, and an ADB-to-USB keycode table.
+
+`src/io/usb/usb.cc` -- the OHCI transfer engine, which **did not exist**: the
+file was a register file with no ED/TD traversal at all.  Added descriptor
+walking for control and interrupt endpoints, the done queue, WDH/RHSC
+interrupts, page-crossing TD buffers, per-port addressing so the two devices can
+be told apart during enumeration, root hub reset/enable semantics, and a frame
+timer.
+
+Three genuine bugs found while doing it:
+
+- `OHCI_RH_PS_LSDA` was `(1 << 8)`, identical to `PPS`; it is bit 9.
+- The USB PCI interrupt line was `0x03`, but `promdt.cc` routes the device to
+  `IO_PIC_IRQ_USB`, so every interrupt went nowhere.
+- `intrstatus` was a plain store; it is write-1-to-clear.  `intrenable` and
+  `intrdisable` are set/clear masks, not stores.
+
+### How far the guest gets
+
+With the PCI IDs left at the original OPTi values no driver attaches at all.
+Changing them to Apple KeyLargo OHCI (`0x106b/0x0019`) makes Mac OS attach:
+
+```
+ctrl_reg=000000bc      operational, control+periodic+bulk lists enabled
+hcca=00148200  ctrlHead=00114880
+intrEn=8000007f -> RHSC enabled; the interrupt is raised and serviced
+```
+
+and then it stops:
+
+```
+portReads=1  TDs=0  ctrl=0  addr0=0 addr1=0
+[USB-PORT] read port0 -> 00010301      (CCS|PPS|LSDA|CSC)
+```
+
+It reads the port status exactly once, never writes to it, and never enables the
+port -- so no device is addressed and no TD is ever processed.
+
+### PC attribution is instruction-accurate -- validated
+
+`ppc_cpu_get_pc()` returns `pc_ofs + current_code_base`, and the aarch64 MMU
+slow-path stubs write `pc_ofs` before calling out (`str w9, [x20, #pc_ofs]` in
+`jitc_mmu.S`), which is the path MMIO takes.  Confirmed directly by reading the
+instruction at each reported PC and checking it really is a memory op:
+
+```
+reg 30 <- 0        pc=00f15eb8  insn=92b3fffc  stw     (nanokernel, in RAM)
+reg 20 <- 0        pc=ffdfbb78  insn=90850020  stw     (ROM)
+reg 18 <- 00148200 pc=ffdfbc44  insn=906c0018  stw     (ROM)
+reg 04 <- 000000bc pc=ffdfbd34  insn=906c0004  stw     (ROM)
+```
+
+**One trap when checking this yourself:** `ppc_dma_read()` takes a *physical*
+address.  A ROM PC such as `0xffdfbb78` reads back as zeros unless you map it
+through the ROM mirror first (`0xffcxxxxx` -> `0x00cxxxxx`).  Reading it raw and
+concluding the PC is bogus is a mistake that cost time here -- as did an earlier
+guess that the commented-out `gCPU.pc = ...` lines in `io.cc` were responsible;
+`ppc_cpu_get_pc()` never reads that field.
+
+### The decisive measurement: Mac OS never touches the controller
+
+Capturing the guest PC on every OHCI register access settles it.  All of the
+setup, and the single port read, come from ROM:
+
+```
+[USB-W] reg 20 <- 00000000  from pc=ffdfbb78     ed_controlhead
+[USB-W] reg 18 <- 00148200  from pc=ffdfbc44     hcca
+[USB-W] reg 04 <- 000000bc  from pc=ffdfbd34     control: operational
+[USB-PORT] read port0 -> 00010303  from pc=ffe02fa0
+```
+
+`0xffdxxxxx`/`0xffexxxxx` is Open Firmware.  **Not one register access comes from
+Mac OS.**  The heavy `fmnumber` polling (hundreds of thousands of reads) is the
+same ROM code's watchdog idle loop.
+
+So the problem is not the transfer engine, the descriptors, the port status, or
+the interrupt: nothing in Mac OS ever binds to this controller, so nothing ever
+enumerates the root hub.  Making the emulated device answer better cannot help
+until something in the OS is driving it.  That is where to start next --
+find why the USB extensions do not attach, rather than tuning the device.
+
+### Two real bugs in the node/device, found late
+
+**The node already published what I kept trying to add.**  Its `compatible` is
+`"pci1045,c861\0pciclass,0c0310\0"` and it already had `assigned-addresses`.
+`pciclass,0c0310` -- the string the driver matches on -- was there all along.
+Two consequences worth knowing:
+
+- An earlier experiment that "added `compatible`" actually added a **second**
+  `compatible` property.  That duplicate is the likely reason it measured
+  harmful; the verdict "compatible is harmful" was wrong.
+- Changing the PCI IDs to Apple's left `compatible` claiming the old OPTi
+  identity `pci1045,c861`, contradicting `vendor-id`/`device-id`.  The Name
+  Registry binds on those names, so the node advertised two identities.  It is
+  now a single consistent `"pci106b,19\0pciclass,0c0310\0"`.
+
+**The PCI command register was never set**, so it read back `0x00`: memory space
+decoding and bus mastering both disabled.  An OHCI controller needs both -- its
+registers are memory mapped and it DMAs its own descriptor lists -- and a driver
+probing that register sees a device it cannot use.  Now `0x06`.
+
+Mac OS reads that register exactly once, from `pc=00026a80` (RAM, not ROM), and
+never touches the device again.  That single probe is the only config-space
+access the device ever receives, and it still happens with the command register
+correct -- so whatever decides not to proceed is deciding on something else.
+
+### The driver's own string table names what it matches on
+
+Extract the extension and dump the strings around the KeyLargo logic (it is a
+PEF container, `Joy!peff`):
+
+```
+0x00962c  pciclass,0c0310      <- the "compatible" value it matches
+0x009645  OHCIUIM
+0x009728  vendor-id / device-id / revision-id
+0x00975e  assigned-addresses / AAPL,address / driver-ist / AAPL,clock-id
+0x00981e  compatible
+0x009829  Keylargo
+```
+
+`pciclass,0c0310` is the generic class-code form of `compatible` that Mac OS's
+Name Registry uses, and our class-code is exactly `0x0c0310`.  That is the
+string to publish -- **not** `pci106b,19`, which was a guess of mine and
+measured actively harmful.  It is now published and is harmless, but on its own
+it still does not make the driver bind.
+
+The remaining properties in that list are the obvious next things to supply:
+`driver-ist`, `AAPL,address`, `assigned-addresses`, `AAPL,SuspendablePorts`.
+
+### What the guest's driver actually wants
+
+Rather than guessing at the device, read the driver.  Mount the image and run
+`strings` over `System Folder/Extensions/USB Device Extension` (395 KB data
+fork; the resource fork is only 5 KB and has nothing useful):
+
+```
+UIM    - keylargo found            <- it explicitly looks for KeyLargo
+Keylargo
+CEGetDeviceCompatibleNames         <- it reads the "compatible" property
+UIM    - PCI Capabilities exists   <- it walks the PCI capability list
+UIM    - PCI Capabilities Ptr:
+UIM    - PCI PMC:                  <- and reads the power-management capability
+AAPL,clock-id
+AAPL,address
+AAPL,current-available
+AAPL,SuspendablePorts
+```
+
+So the OHCI UIM expects an Apple KeyLargo-style controller: a `compatible`
+property it can match, a PCI **capability list** with a power-management
+capability (our config space has none -- status bit 4 clear, capability pointer
+0), and several `AAPL,` properties.  Note it also expects to *find KeyLargo* --
+on a real Cube the USB controllers are functions of KeyLargo, whereas ours is a
+standalone PCI device on the bridge.  That structural difference is the most
+likely reason nothing binds.
+
+Each of these has now been tried individually:
+
+| Change | Result |
+|---|---|
+| `AAPL,clock-id` = "usb0" | Harmless -- reaches the login screen -- but nothing binds |
+| PCI capability list with a PM capability (status bit 4, cap pointer 0x40, PM cap) | Harmless, kept, but nothing binds |
+| `compatible` = `"pci106b,19\0usb"` | **Harmful**: 3 of 3 boots failed to reach the login screen |
+| Move `usb` beside `mac-io` under the host `pci` node | Breaks the boot (`MacOS: Fatal Error! (0xF3B37FDB)` after ~1,500 entry points) **if done alone** -- the host node's `interrupt-map` had only the video card in it, leaving the moved node unmappable.  Adding a `usb` entry to that map (child unit address `0x00003000` -> `IO_PIC_IRQ_USB`) makes the move clean: boots reach the login screen.  Kept, because it matches real hardware -- but it does **not** make the driver bind. |
+
+Our `mac-io` node already advertises `compatible = "Keylargo"` and
+`model = "KeyLargo"`, so the driver's KeyLargo probe is satisfied.  Note that
+`mac-io`'s own `reg` says bus 1 even though it hangs below the host node, so the
+parent/bus mismatch is not what matters here.
+
+With the topology corrected, the capability list present and `AAPL,clock-id`
+set, Mac OS **still** never touches the controller: every register access traces
+to ROM.  Everything reachable from the device tree has now been tried.  What
+remains is to find the driver's actual matching path -- disassembling
+`USB Device Extension` around its `CEGetDeviceCompatibleNames` call and the
+"keylargo found" branch would show exactly which node and properties it walks,
+rather than inferring it from the outside.
+
+### Tried and rejected
+
+| Change | Result |
+|---|---|
+| SOF interrupt raised per frame | Guest drowns in ISR entries; boot dies.  The status bit is set, the interrupt is not raised. |
+| Frame counter advanced 1:1 with real time | No change; the heavy `fmnumber` polling is the ROM's USB watchdog idle loop, not a stall |
+| `HccaFrameNumber` published in step with `HcFmNumber` | Correct and kept -- Open Firmware declares the controller broken if the register runs more than 5 frames ahead (`addi r0,r4,5; cmp r6,r0; ble`) -- but not sufficient |
+| `POTPGT` set to a real value | No change |
+| Devices hot-plugged after the bus comes up rather than present from reset | No change |
+| `compatible` property added to the `usb` node | **Harmful** -- retested on a clean disk, 3 of 3 boots failed to reach the login screen, where the same build without it reached it on the first attempt.  Reverted. |
+
+### Also fixed: enabling an interrupt must assert a pending one
+
+`intrenable` was a set-mask only.  A driver that enables RHSC *after* the ports
+have already come up waits forever for an edge that has already happened, so the
+write now calls `raiseIRQ()`.  This is correct behaviour regardless, and it is
+what finally got the guest to read the port status in the engine-off
+configuration.
+
+### The engine is off by default
+
+`pci_usb_hid` gates the frame thread and defaults to **0**.  With it running, the
+thread keeps publishing the frame number into the HCCA that Open Firmware
+programmed; once Mac OS reclaims that memory the writes corrupt it and
+extensions fail with "error type 10".  Bisection confirmed this was the cause of
+a run of failed boots.  Do not enable it until the guest's driver owns the
+controller.
+
+### A dead end worth recording: the low-memory pointer shim
+
+Writing `RawMouse`/`MTemp` directly does move Mac OS's pointer coordinates --
+verified, they track injected motion exactly -- but **the cursor does not
+redraw**, so it achieves nothing visible.  It is also unsafe: applied from the
+event thread it races the CPU, and applied at all before the Toolbox owns low
+memory it corrupts startup (boots bomb at ~5%).  The code is left in place
+behind `gCudaShimEnabled`, off.
+
+### VBL is now delivered
+
+`gcard_raise_interrupt()` existed but **nothing ever called it**, so vertical
+blank interrupts were never generated even when the guest enabled them.  It is
+now called from the redraw loop and `Ignore VBL` is `no`.  This matters because
+Mac OS moves the cursor from a VBL task.  Tested stable on its own.
+
+---
+
 ## 5. The image is truncated
 
 The Apple Partition Map:

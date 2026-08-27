@@ -35,6 +35,7 @@
 #include "system/display.h"
 #include "system/keyboard.h"
 #include "system/mouse.h"
+#include "io/graphic/gcard.h"
 #include "system/systhread.h"
 #include "system/systimer.h"
 
@@ -271,6 +272,12 @@ void runUI()
 		}
 		// Periodic redraw regardless of events
 		gDisplay->displayShow();
+		/*
+		 * Vertical blank.  Mac OS moves the cursor from a VBL task, so without
+		 * this the pointer never follows the mouse whatever the input driver
+		 * reports.  The card only raises it once the guest asks for it.
+		 */
+		gcard_raise_interrupt();
 	}
 
 	gDisplay->setMouseGrab(false);

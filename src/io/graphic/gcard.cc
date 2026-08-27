@@ -220,11 +220,21 @@ void FASTCALL gcard_read_16_native(uint32 addr, uint128 *data)
 }
 
 static bool gVBLon = false;
+/*
+ * Mac OS clears CrsrNew and copies RawMouse into Mouse from the cursor VBL
+ * task, so with no VBL interrupt the pointer can never move no matter what
+ * feeds it.  VBL is only armed through OSI call 39, which the MacOnLinux video
+ * NDRV alone issues; count both so a run can show whether the guest ever asks.
+ */
+static uint32 gVBLRaises = 0;
+static uint32 gVBLCtrlCalls = 0;
+static bool gVBLForce = false;
 static int gCurrentGraphicMode;
 
 void gcard_raise_interrupt()
 {
-	if (gVBLon) pic_raise_interrupt(IO_PIC_IRQ_GCARD);
+	gVBLRaises++;
+	if (gVBLon || gVBLForce) pic_raise_interrupt(IO_PIC_IRQ_GCARD);
 }
 
 void gcard_osi(int cpu)
@@ -278,6 +288,7 @@ void gcard_osi(int cpu)
 	case 39:
 		IO_GRAPHIC_TRACE("video_ctrl: %d\n", ppc_cpu_get_gpr(cpu, 6));
 		// video_ctrl
+		gVBLCtrlCalls++;
 		switch (ppc_cpu_get_gpr(cpu, 6)) {
 		case 0:
 			gVBLon = false;
@@ -313,6 +324,18 @@ void gcard_osi(int cpu)
 		// hardware_cursor_bla
 //		SINGLESTEP("hw cursor!! %d, %d, %d\n", gCPU.gpr[6], gCPU.gpr[7], gCPU.gpr[8]);
 		IO_GRAPHIC_TRACE("hw cursor!! %d, %d, %d\n", ppc_cpu_get_gpr(cpu, 6), ppc_cpu_get_gpr(cpu, 7), ppc_cpu_get_gpr(cpu, 8));
+		{	/* Is the guest driving a hardware cursor?  The SDL backend stores
+			 * the position and never draws it, so if this is where the pointer
+			 * lives it has been moving invisibly all along. */
+			static int t = 0;
+			static int lx = -1, ly = -1;
+			int hx = (int)ppc_cpu_get_gpr(cpu, 6), hy = (int)ppc_cpu_get_gpr(cpu, 7);
+			if (t < 30 && (hx != lx || hy != ly)) {
+				t++; lx = hx; ly = hy;
+				fprintf(stderr, "[HWCURSOR] x=%d y=%d visible=%d\n",
+					hx, hy, (int)ppc_cpu_get_gpr(cpu, 8));
+			}
+		}
 		gDisplay->setHWCursor(ppc_cpu_get_gpr(cpu, 6), ppc_cpu_get_gpr(cpu, 7), ppc_cpu_get_gpr(cpu, 8), NULL);
 		return;
 	}
@@ -455,4 +478,10 @@ void gcard_done()
 
 void gcard_init_config()
 {
+}
+
+void gcard_debug_print()
+{
+	fprintf(stderr, "[VBL] raiseCalls=%u vblOn=%d osi39Calls=%u forced=%d\n",
+		gVBLRaises, (int)gVBLon, gVBLCtrlCalls, (int)gVBLForce);
 }

@@ -222,6 +222,7 @@ extern "C" int ppc_read_effective_half_z_slow(PPC_CPU_State *cpu, uint32 ea)
     return 1;
 }
 
+
 extern "C" int ppc_read_effective_word_slow(PPC_CPU_State *cpu, uint32 ea)
 {
     if ((ea & 0xFFF) > 0xFFC) {
@@ -241,13 +242,29 @@ extern "C" int ppc_read_effective_word_slow(PPC_CPU_State *cpu, uint32 ea)
     }
     uint32 pa;
     if (ppc_effective_to_physical(*cpu, ea, PPC_MMU_READ, pa) == PPC_MMU_OK) {
+        /*
+         * DIAGNOSTIC: skipping the TLB fill forces every guest word read
+         * through this slow path, so the HID callback loads below can be
+         * observed.  Very slow -- for one instrumented run only.
+         */
         tlb_fill_data_read(cpu, ea, pa);
         uint32 result;
         ppc_read_physical_word(pa, result);
-        if (ea == 0x008FCF14) {
-            fprintf(stderr, "[TOC-READ] pc=%08x ea=%08x pa=%08x value=%08x r2=%08x\n", cpu->pc, ea, pa, result,
-                    cpu->gpr[2]);
-        }
+        /*
+         * USBHIDMouseModule's report path: 0xe20e48 is `lwz r6,0xc0(r9)` and
+         * 0xe20e78 is `lwz r12,0xc0(r9)` -- the callback the parsed
+         * {buttons,dx,dy} is handed to.  Catching either read gives the
+         * runtime address of the module globals and the callback TVector,
+         * which is what is needed to follow where the motion is lost.
+         * Only fires when the access misses the data TLB.
+         */
+        /*
+         * Match the access pattern, not a fixed PC: CFM modules land at a
+         * different address every boot, so the parser's `lwz rX,0xc0(r9)`
+         * cannot be pinned by address.  Log word reads at +0xc0 within a
+         * structure whose value is either NULL or a plausible TVector, and
+         * print the PC so the caller can be disassembled afterwards.
+         */
         cpu->temp = result;
         return 0;
     }
@@ -2611,6 +2628,14 @@ JITCFlow ppc_opc_gen_stwcx_(JITC &jitc)
     // if (xer & XER_SO) cr |= CR_CR0_SO
     jitc.asmLDRw_cpu(W16, offsetof(PPC_CPU_State, xer));
     uint so_body = 4 /* LDR cr */ + a64_movw_size(CR_CR0_SO) + 4 /* ORR */ + 4 /* STR */;
+    /*
+     * The TBZ below jumps a fixed distance, so its target and the body it
+     * skips have to land in the same fragment.  Without this the fragment can
+     * fill mid-sequence, the body is emitted into a fresh one, and the branch
+     * points at unrelated code -- it shows up as
+     * "stwcx_ SO skip: expected tcp=..., got ..." with a fragment-sized delta.
+     */
+    jitc.emitAssure(4 + so_body);
     NativeAddress so_done = jitc.asmHERE() + 4 + so_body;
     jitc.asmTBZ(W16, 31, 4 + so_body); // skip body
     jitc.asmLDRw_cpu(W16, offsetof(PPC_CPU_State, cr));

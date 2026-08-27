@@ -28,6 +28,7 @@
 #include "io/cuda/cuda.h"
 #include "io/pic/pic.h"
 #include "io/nvram/nvram.h"
+#include "io/usb/usb.h"
 #include "io/ide/ide.h"
 #include "io/3c90x/3c90x.h"
 #include "io/rtl8139/rtl8139.h"
@@ -1351,7 +1352,10 @@ void prom_init_device_tree()
 	byte interruptmap23[] = {
 	// aty
 	0x00,0x00,0x38,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
-	UINT32(phandlepic),  0x00,0x00,0x00,IO_PIC_IRQ_GCARD, 0x00,0x00,0x00,0x00};
+	UINT32(phandlepic),  0x00,0x00,0x00,IO_PIC_IRQ_GCARD, 0x00,0x00,0x00,0x00,
+	// usb -- sits below this node beside mac-io, so its interrupt is mapped here
+	0x00,0x00,0x30,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+	UINT32(phandlepic),  0x00,0x00,0x00,IO_PIC_IRQ_USB, 0x00,0x00,0x00,0x00};
 	pci->addProp(new PromPropMemory("interrupt-map", &interruptmap23, sizeof interruptmap23));
 	byte interruptmapmask23[] = {
 	0x00,0x00,0xf8,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
@@ -1709,30 +1713,54 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
     macio->addNodeShort(pmuPlatform ? "via-pmu" : "via-cuda", viaName);
 	/*
 	 * PearPC routes host keyboard and mouse events through the CUDA/PMU ADB
-	 * packet interface.  Keep these compatibility nodes on PMU machines too;
-	 * the emulated OHCI controller does not yet provide USB HID devices.
+	 * packet interface.  A real G4 Cube has no ADB at all, so when the OHCI
+	 * root hub is carrying HID devices the ADB mouse and keyboard nodes are
+	 * withdrawn: leaving them advertised gives Mac OS a pointer device that
+	 * can never send anything, and it binds the cursor to that instead of to
+	 * the USB mouse it is happily enumerating and polling.
 	 */
+	/*
+	 * Keep the ADB input nodes even when USB HID is present.  A real Cube has
+	 * no ADB, but Mac OS's USBHIDDriver imports CountADBs and builds its
+	 * pointer through the Cursor Device Manager, so the ADB/cursor
+	 * infrastructure may need to exist for HIDCreateCursorDevice to succeed.
+	 * Withdrawing them was tried and changed nothing either way.
+	 */
+	/*
+	 * Withdraw the ADB mouse/keyboard nodes when the OHCI root hub carries HID
+	 * devices -- a real Cube has no ADB.  Beyond authenticity: MBState is a
+	 * single global byte, but the cursor belongs to a per-device CursorDevice
+	 * record, so an ADB pointer that registers first can own the screen cursor
+	 * while our USB CursorDeviceMove calls land on a device nothing draws.
+	 * That is the shape of the observed split -- buttons applied, motion lost.
+	 */
+	const bool adbInput = !usb_hid_present();
 	PromNode *adb = new PromNode("adb");
 	via->addNode(adb);
 	adb->addProp(new PromPropString("device_type", "adb"));
 	adb->addProp(new PromPropString("compatible", pmuPlatform ? "pmu-99" : "adb"));
 	adb->addProp(new PromPropInt("#address-cells", 1));
 	adb->addProp(new PromPropInt("#size-cells", 0));
-	PromNode *keyboard = new PromNode("keyboard");
-	adb->addNode(keyboard);
-	keyboard->addProp(new PromPropString("device_type", "keyboard"));
-	keyboard->addProp(new PromPropInt("reg", 2));
-	PromNode *mouse = new PromNode("mouse");
-	adb->addNode(mouse);
-	mouse->addProp(new PromPropString("device_type", "mouse"));
-	mouse->addProp(new PromPropInt("#buttons", 3));
-	mouse->addProp(new PromPropInt("reg", 3));
-	aliases->addProp(new PromPropString(
-	    "adb-keyboard", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/keyboard"
-	                                : "/pci@80000000/mac-io@5/via-cuda@16000/adb/keyboard"));
-	aliases->addProp(new PromPropString(
-	    "adb-mouse", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/mouse"
-	                             : "/pci@80000000/mac-io@5/via-cuda@16000/adb/mouse"));
+	if (adbInput) {
+		PromNode *keyboard = new PromNode("keyboard");
+		adb->addNode(keyboard);
+		keyboard->addProp(new PromPropString("device_type", "keyboard"));
+		keyboard->addProp(new PromPropInt("reg", 2));
+		PromNode *mouse = new PromNode("mouse");
+		adb->addNode(mouse);
+		mouse->addProp(new PromPropString("device_type", "mouse"));
+		mouse->addProp(new PromPropInt("#buttons", 3));
+		mouse->addProp(new PromPropInt("reg", 3));
+	}
+	if (adbInput) {
+		/* Only meaningful while the ADB input nodes above exist. */
+		aliases->addProp(new PromPropString(
+		    "adb-keyboard", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/keyboard"
+		                                : "/pci@80000000/mac-io@5/via-cuda@16000/adb/keyboard"));
+		aliases->addProp(new PromPropString(
+		    "adb-mouse", pmuPlatform ? "/pci@80000000/mac-io@5/via-pmu@16000/adb/mouse"
+		                             : "/pci@80000000/mac-io@5/via-cuda@16000/adb/mouse"));
+	}
 //	byte regmouse[] = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
 //	mouse->addProp(new PromPropMemory("reg", &regmouse, sizeof regmouse));
 	via->addProp(new PromPropString("compatible", pmuPlatform ? "pmu" : "cuda"));
@@ -1873,20 +1901,45 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	 *	USB
 	 */
 	PromNode *usb = new PromNode("usb@6");
+	/*
+	 * A Cube's USB controllers belong to the KeyLargo ASIC and sit below the
+	 * host PCI node beside mac-io, not behind the PCI bridge.  Apple's OHCI UIM
+	 * looks for KeyLargo and expects to find the controller with it.  The
+	 * matching interrupt-map entry is added to that node above.
+	 */
+	/* The OHCI controller lives on bus 1 (PCI_Device("pci-usb", 0x01, 0x06)),
+	 * so like the other bus-1 devices it hangs off the P2P bridge.  The ROM
+	 * resolves a node's IRQ through its parent bus's interrupt-map; parented
+	 * to the bus-0 grackle node it never matched, so no AAPL,interrupts was
+	 * created and the driver loader silently skipped the OHCI UIM. */
 	bridge->addNode(usb);
 	bridge->addNodeShort("usb", "usb@6");
-	usb->addProp(new PromPropInt("vendor-id", 0x1045));
-	usb->addProp(new PromPropInt("device-id", 0xc861));
+	usb->addProp(new PromPropInt("vendor-id", 0x106b));
+	usb->addProp(new PromPropInt("device-id", 0x0019));
 	usb->addProp(new PromPropInt("revision-id", 0x10));
 	usb->addProp(new PromPropInt("class-code", 0x0c0310));
 	usb->addProp(new PromPropInt("interrupts", 1));
 	usb->addProp(new PromPropInt("min-grant", 0));
 	usb->addProp(new PromPropInt("max-latency", 0));
-	usb->addProp(new PromPropInt("subsystem-vendor-id", 0x1045));
-	usb->addProp(new PromPropInt("subsystem-id", 0xc861));
+	usb->addProp(new PromPropInt("subsystem-vendor-id", 0x106b));
+	usb->addProp(new PromPropInt("subsystem-id", 0x0019));
 	usb->addProp(new PromPropInt("devsel-speed", 1));
 	usb->addProp(new PromPropString("fast-back-to-back", ""));
 	usb->addProp(new PromPropString("device_type", "usb"));
+	/*
+	 * Apple's OHCI UIM reads AAPL,clock-id to drive the controller's clock
+	 * through the platform expert; the driver's own strings show it looking for
+	 * KeyLargo and calling CEGetDeviceCompatibleNames.
+	 */
+	usb->addProp(new PromPropString("AAPL,clock-id", "usb0"));
+	/*
+	 * Turn the USB stack's own logging up.  USBServicesLib reads this from the
+	 * Name Registry to decide how much it reports, and its drivers carry
+	 * messages we need -- "HIDCreateCursorDevice failed to create cursor" among
+	 * them.  Emitted messages can then be found in guest memory, away from the
+	 * PEF string tables where the unemitted copies live.
+	 */
+	usb->addProp(new PromPropInt("USBExpertStatusLevel", 7));
 	byte usbreg[] = {
 	0x00,0x01,0x30,0x00,
 	0x00,0x00,0x00,0x00,
@@ -1910,7 +1963,9 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	usb->addProp(new PromPropInt("#address-cells", 1));
 	usb->addProp(new PromPropInt("#size-cells", 0));
 	usb->addProp(new PromPropMemory("compatible", 
-		"pci1045,c861\x00pciclass,0c0310\x00", 29));
+		/* Must agree with vendor-id/device-id above -- the Name Registry binds
+		 * on these names, and a stale vendor form leaves the node unmatched. */
+		"pci106b,19\x00pciclass,0c0310\x00", 27));
 	usb->addProp(new PromPropMemory("assigned-addresses", &usbaa, sizeof usbaa));
 
 	PromNode *usbhub = new PromNode("hub@1");
@@ -1937,7 +1992,9 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	aty->addProp(new PromPropInt("class-code", 0x30000));
 	aty->addProp(new PromPropString("device_type", "display"));
 	aty->addProp(new PromPropString("model", "PearPC,display"));
-	aty->addProp(new PromPropString("Ignore VBL", "yes"));
+	/* VBL is delivered now (gcard_raise_interrupt); Mac OS needs it because the
+	 * cursor is moved by a VBL task. */
+	aty->addProp(new PromPropString("Ignore VBL", "no"));
 	aty->addProp(new PromPropInt("width", gDisplay->mClientChar.width));
 	aty->addProp(new PromPropInt("height", gDisplay->mClientChar.height));
 	aty->addProp(new PromPropInt("depth", gDisplay->mClientChar.bytesPerPixel * 8));
@@ -1977,6 +2034,9 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	aliases->addProp(new PromPropString("bridge", "/pci/pci-bridge"));
 	aliases->addProp(new PromPropString("macio", "/pci/pci-bridge/macio"));
 	aliases->addProp(new PromPropString("screen", "/pci@80000000/PearPCVideo"));
+	/* Lets prom.cc hand the OHCI UIM to the controller node, as it does for
+	 * the display driver above. */
+	aliases->addProp(new PromPropString("usb", "/pci/pci-bridge/usb"));
 	int cdromcount=0, hdcount=0;
 	for (int i=0; i<2; i++) {
 		if (ic[i]->installed) {

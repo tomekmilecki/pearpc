@@ -21,7 +21,15 @@
 #ifndef __IO_USB_H__
 #define __IO_USB_H__
 
+#include "system/types.h"
+
 void usb_init();
+/* Host input, forwarded by the machine's event handler. */
+void usb_hid_mouse_event(int dx, int dy, bool button1, bool button2, bool button3);
+void usb_hid_key_event(uint8 adbKey, bool pressed);
+void usb_debug_print();
+/* True when the emulated OHCI root hub carries HID devices. */
+bool usb_hid_present();
 void usb_done();
 void usb_init_config();
 

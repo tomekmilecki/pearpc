@@ -39,6 +39,7 @@ String gPromBootPath;
 #define PROM_KEY_ENV_MACHARGS "prom_env_machargs"
 #define PROM_KEY_ENV_LOADFILE "prom_loadfile"
 #define PROM_KEY_DRIVER_GRAPHIC "prom_driver_graphic"
+#define PROM_KEY_DRIVER_USB "prom_driver_usb"
 
 void prom_init()
 {
@@ -88,6 +89,34 @@ void prom_init()
 		}
 	}
 	
+	/*
+	 * Same mechanism as the graphics NDRV above.  The Apple OHCI UIM is an
+	 * NDRV whose DriverDescription names "pciclass,0c0310", but Mac OS never
+	 * matches it against the node -- the driver sits loaded in memory and is
+	 * never installed.  Handing it to the node directly is how the display
+	 * driver gets bound here, so do the same for the USB controller.
+	 */
+	if (gConfig->haveKey(PROM_KEY_DRIVER_USB)) {
+		String filename;
+		gConfig->getConfigString(PROM_KEY_DRIVER_USB, filename);
+		if (filename.length()) {
+			FILE *ufile = fopen(filename.contentChar(), "rb");
+			if (!ufile) IO_PROM_ERR("%s: can't open %y\n", PROM_KEY_DRIVER_USB, &filename);
+			fseek(ufile, 0, SEEK_END);
+			int usize = ftell(ufile);
+			fseek(ufile, 0, SEEK_SET);
+			byte *u = (byte*)malloc(usize);
+			fread(u, 1, usize, ufile);
+			fclose(ufile);
+			PromNode *usbnode = findDevice("usb", FIND_DEVICE_FIND, NULL);
+			if (usbnode) {
+				usbnode->addProp(new PromPropMemory("driver,AAPL,MacOS,PowerPC", u, usize));
+			} else {
+				IO_PROM_ERR("'usb' package not found.\n");
+			}
+		}
+	}
+
 	prom_mem_init();
 }
 
@@ -99,6 +128,7 @@ void prom_init_config()
 	gConfig->acceptConfigEntryStringDef(PROM_KEY_ENV_MACHARGS, "");
 	gConfig->acceptConfigEntryString(PROM_KEY_ENV_LOADFILE, false);
 	gConfig->acceptConfigEntryStringDef(PROM_KEY_DRIVER_GRAPHIC, "");
+	gConfig->acceptConfigEntryStringDef(PROM_KEY_DRIVER_USB, "");
 }
 
 void prom_quiesce()

@@ -52,6 +52,17 @@
 #define MACIO_BOARD_CONTROL_BASE 0x17e00
 #define MACIO_BOARD_CONTROL_SIZE 0x100
 
+/*
+ * KeyLargo's Feature Control Registers gate the clocks and pads of the cells
+ * inside the chip -- the USB cells among them.  Apple's OHCI UIM finds KeyLargo
+ * (mac-io advertises compatible = "Keylargo"), enables its cell through these
+ * registers and reads the value back to confirm.  A plain read/write register
+ * file satisfies that hand-shake without having to model individual bits, and
+ * keeps an unhandled read from turning into a fatal PCI error.
+ */
+#define MACIO_FCR_BASE 0x38
+#define MACIO_FCR_END (MACIO_FCR_BASE + 4 * MACIO_FCR_COUNT)
+
 #define MACIO_GPIO_BASE 0x50
 #define MACIO_GPIO_SIZE 0x30
 #define MACIO_PMU_EXTINT_GPIO 0x59
@@ -229,6 +240,8 @@ PCI_MacIO::PCI_MacIO()
         }
         mDBDMAChannels[channel].waitingForInput = false;
     }
+
+    for (uint reg = 0; reg < MACIO_FCR_COUNT; ++reg) mFCR[reg] = 0;
 }
 
 static uint16 readLittleEndian16(const byte *data)
@@ -701,6 +714,13 @@ bool PCI_MacIO::readDeviceMem(uint r, uint32 address, uint32 &data, uint size)
     if (r == 0 && address >= MACIO_GPIO_BASE && address < MACIO_GPIO_BASE + MACIO_GPIO_SIZE &&
         cuda_is_pmu()) {
         data = address == MACIO_PMU_EXTINT_GPIO && !cuda_pmu_extint_asserted() ? 0x02 : 0;
+        if (address == MACIO_PMU_EXTINT_GPIO) cuda_debug_count_extint_read();
+        return true;
+    }
+
+    if (r == 0 && size == 4 && address >= MACIO_FCR_BASE && address < MACIO_FCR_END) {
+        data = mFCR[(address - MACIO_FCR_BASE) >> 2];
+        { static int t=0; if (t<12) { t++; fprintf(stderr, "[FCR] read  @%02x -> %08x\n", address, data); } }
         return true;
     }
 
@@ -759,6 +779,13 @@ bool PCI_MacIO::writeDeviceMem(uint r, uint32 address, uint32 data, uint size)
 
     if (r == 0 && address >= MACIO_GPIO_BASE && address < MACIO_GPIO_BASE + MACIO_GPIO_SIZE &&
         cuda_is_pmu()) {
+        return true;
+    }
+
+    if (r == 0 && size == 4 && address >= MACIO_FCR_BASE && address < MACIO_FCR_END) {
+        mFCR[(address - MACIO_FCR_BASE) >> 2] = data;
+        { static int t=0; if (t<12) { t++; fprintf(stderr, "[FCR] write @%02x <- %08x\n", address, data); } }
+        IO_MACIO_TRACE("feature-control: write @%08x: %08x\n", address, data);
         return true;
     }
 

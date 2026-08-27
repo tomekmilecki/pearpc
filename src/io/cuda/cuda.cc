@@ -41,6 +41,8 @@
 #include "tools/snprintf.h"
 #include "debug/tracers.h"
 #include "io/pic/pic.h"
+#include "io/usb/usb.h"
+#include "io/graphic/gcard.h"
 #include "system/keyboard.h"
 #include "system/mouse.h"
 #include "system/sys.h"
@@ -314,6 +316,14 @@ bool cuda_is_pmu()
     return gCUDA.pmuMode;
 }
 
+static int gPktVariant;     /* 0..3: which autopoll packet encoding to try */
+static int gAdbQueued;      /* autopoll packets we handed to the PMU */
+static int gAdbDelivered;   /* of those, how many the guest actually collected */
+static int gExtIntReads;    /* guest reads of the PMU interrupt GPIO */
+
+int cuda_debug_extint_reads() { return gExtIntReads; }
+void cuda_debug_count_extint_read() { gExtIntReads++; }
+
 bool cuda_pmu_extint_asserted()
 {
     return gCUDA.pmuMode && (gCUDA.pmuInterruptBits & gCUDA.pmuInterruptMask) != 0;
@@ -410,6 +420,7 @@ static void pmu_dispatch_command()
         break;
     case PMU_INT_ACK:
         if ((gCUDA.pmuInterruptBits & PMU_INT_ADB) && gCUDA.pmuAdbReplyLength) {
+            gAdbDelivered++;
             response[0] = gCUDA.pmuInterruptBits & (PMU_INT_ADB | PMU_INT_ADB_AUTO);
             memcpy(response + 1, gCUDA.pmuAdbReply, gCUDA.pmuAdbReplyLength);
             responseLength = gCUDA.pmuAdbReplyLength + 1;
@@ -1252,8 +1263,11 @@ void cuda_write(uint32 addr, uint32 data, int size)
 	sys_unlock_mutex(gCUDAMutex);
 }
 
+static void cuda_shim_apply();
+
 void cuda_read(uint32 addr, uint32 &data, int size)
 {
+	cuda_shim_apply();	/* CPU thread: safe point to touch guest memory */
 	sys_lock_mutex(gCUDAMutex);
 
 	IO_CUDA_TRACE("%d read word @%08x\n", gCUDA.state, addr);
@@ -1438,8 +1452,149 @@ void cuda_debug_inject_mouse_motion()
 	gDebugInjectMouseMotion = 1;
 }
 
+
+/*
+ * Fallback pointer shim.
+ *
+ * Mac OS on this machine takes input from USB HID; it enumerates the emulated
+ * ADB bus but discards its data, and the emulated OHCI root hub is not brought
+ * up by the guest's driver, so neither path moves the pointer.  Until one of
+ * them works, drive the Cursor Manager's own globals directly.
+ *
+ * Low memory sits at physical 0x4000.  RawMouse and MTemp are what the
+ * interrupt handler would normally write, CrsrNew tells the VBL task the
+ * position moved, and MBState carries the button (active low).
+ */
+#define LOMEM_BASE	0x4000
+#define LOMEM_MBSTATE	0x0172
+#define LOMEM_MTEMP	0x0828
+#define LOMEM_RAWMOUSE	0x082c
+#define LOMEM_MOUSE	0x0830
+#define LOMEM_CRSRPIN	0x0834
+#define LOMEM_CRSRNEW	0x08ce
+#define LOMEM_CRSRCOUPLE 0x08cf
+
+static bool readPoint(uint32 off, sint16 &v, sint16 &h)
+{
+	uint8 b[4];
+	if (!ppc_dma_read(b, LOMEM_BASE + off, 4)) return false;
+	v = (sint16)((b[0] << 8) | b[1]);
+	h = (sint16)((b[2] << 8) | b[3]);
+	return true;
+}
+
+static void writePoint(uint32 off, sint16 v, sint16 h)
+{
+	uint8 b[4] = { (uint8)(v >> 8), (uint8)v, (uint8)(h >> 8), (uint8)h };
+	ppc_dma_write(LOMEM_BASE + off, b, 4);
+}
+
+/*
+ * Accumulated on the event thread, applied on the CPU thread.  Writing guest
+ * memory straight from the event thread races the running CPU and corrupts
+ * extensions during startup ("address error" in whatever is loading).
+ */
+static volatile int gShimDx, gShimDy;
+static volatile int gShimButton;
+static volatile int gShimPending;
+/*
+ * Off by default.  The shim writes Mac OS low memory directly, and doing that
+ * before the Toolbox owns it corrupts startup -- boots bomb at around 5% with
+ * "illegal instruction".  It moves RawMouse correctly once the system is up,
+ * but it does not make the cursor redraw, so it buys nothing today.
+ */
+/*
+ * Jam Mac OS's own mouse globals.  Nothing binds a driver to the emulated ADB
+ * bus on a Cube and the USB stack does not yet start its UIM, so this is the
+ * only path that reaches the cursor -- the same one SheepShaver and Basilisk II
+ * use.  cuda_shim_write() refuses to run until CrsrPin holds a sane rectangle,
+ * which keeps it clear of the startup window where the Toolbox has not yet
+ * taken ownership of low memory.
+ */
+/*
+ * Jam Mac OS's cursor globals directly.  Mac OS 9.2 draws the arrow at Mouse
+ * (0x830) and its USB HID driver applies our button byte but silently drops
+ * the motion bytes, so nothing else moves it.
+ */
+static int gCudaShimEnabled = 0;	/* CONCLUSIVELY dead: with Mouse(0x830) reading 460,12 the arrow still drew at 15,15 -- Mac OS 9 keeps the drawn cursor in Cursor Manager private state, reachable only via CursorDeviceMove */
+static void cuda_shim_write(int dx, int dy, bool button);
+
+void cuda_shim_mouse(int dx, int dy, bool button)
+{
+	gShimDx += dx;
+	gShimDy += dy;
+	gShimButton = button ? 1 : 0;
+	gShimPending = 1;
+}
+
+/* Runs on the CPU thread, from the VIA register path. */
+static void cuda_shim_apply()
+{
+	if (!gCudaShimEnabled) return;
+	if (!gShimPending) return;
+	int dx = gShimDx, dy = gShimDy;
+	bool button = gShimButton != 0;
+	gShimDx -= dx;
+	gShimDy -= dy;
+	gShimPending = 0;
+	cuda_shim_write(dx, dy, button);
+}
+
+static void cuda_shim_write(int dx, int dy, bool button)
+{
+	sint16 v, h, top, left, bottom, right;
+	if (!readPoint(LOMEM_RAWMOUSE, v, h)) return;
+	if (!readPoint(LOMEM_CRSRPIN, top, left)) return;
+	uint8 b[8];
+	if (!ppc_dma_read(b, LOMEM_BASE + LOMEM_CRSRPIN, 8)) return;
+	top    = (sint16)((b[0] << 8) | b[1]);
+	left   = (sint16)((b[2] << 8) | b[3]);
+	bottom = (sint16)((b[4] << 8) | b[5]);
+	right  = (sint16)((b[6] << 8) | b[7]);
+	/* Nothing sensible to clamp against until the Toolbox has set this up. */
+	if (bottom <= top || right <= left) return;
+
+	int nv = v + dy;
+	int nh = h + dx;
+	if (nv < top) nv = top;
+	if (nv > bottom - 1) nv = bottom - 1;
+	if (nh < left) nh = left;
+	if (nh > right - 1) nh = right - 1;
+
+	writePoint(LOMEM_MTEMP, (sint16)nv, (sint16)nh);
+	writePoint(LOMEM_RAWMOUSE, (sint16)nv, (sint16)nh);
+	/*
+	 * Also write Mouse itself.  The framebuffer shows the arrow drawn at
+	 * whatever Mouse holds, and nothing here updates it: Mac OS 9 expects its
+	 * input driver to do that through the Cursor Device Manager, and ours
+	 * applies the button byte but drops the motion bytes.  Writing RawMouse
+	 * alone leaves the cursor where Mouse still points, which is exactly what
+	 * the captures showed.
+	 */
+	writePoint(LOMEM_MOUSE, (sint16)nv, (sint16)nh);
+
+	uint8 one = 1;
+	ppc_dma_write(LOMEM_BASE + LOMEM_CRSRNEW, &one, 1);	/* redraw at the new spot */
+
+	uint8 mb = button ? 0x00 : 0x80;			/* active low */
+	ppc_dma_write(LOMEM_BASE + LOMEM_MBSTATE, &mb, 1);
+}
+
 static bool cudaEventHandler(const SystemEvent &ev)
 {
+	/*
+	 * A G4 Cube's keyboard and mouse are USB, and that is where Mac OS takes
+	 * input from -- it enumerates the emulated ADB bus but ignores its data.
+	 * Feed both so either path can serve the guest.
+	 */
+	if (ev.type == sysevMouse) {
+		usb_hid_mouse_event(ev.mouse.relx, ev.mouse.rely,
+			ev.mouse.button1, ev.mouse.button2, ev.mouse.button3);
+		cuda_shim_mouse(ev.mouse.relx, ev.mouse.rely, ev.mouse.button1);
+	} else if (ev.type == sysevKey) {
+		usb_hid_key_event(ev.key.keycode, ev.key.pressed);
+	}
+
 	sys_lock_semaphore(gCUDAEventSem);
 //	ht_printf("queue  %d\n", ev.key.pressed);
 	gCUDAEvents.enQueue(new SystemEventObject(ev));
@@ -1466,10 +1621,14 @@ static bool doProcessCudaEvent(const SystemEvent &ev)
         if (ev.type == sysevKey) {
             uint8 key = ev.key.keycode;
             if (!ev.key.pressed) key |= 0x80;
-            gCUDA.pmuAdbReply[0] = 0x2c;
-            gCUDA.pmuAdbReply[1] = key;
-            gCUDA.pmuAdbReply[2] = 0xff;
-            gCUDA.pmuAdbReplyLength = 3;
+            /* Same framing as a solicited ADB reply: status, length, then the
+             * ADB command byte and its data.  See pmu_dispatch_command(). */
+            gCUDA.pmuAdbReply[0] = 1;
+            gCUDA.pmuAdbReply[1] = 3;
+            gCUDA.pmuAdbReply[2] = 0x2c;
+            gCUDA.pmuAdbReply[3] = key;
+            gCUDA.pmuAdbReply[4] = 0xff;
+            gCUDA.pmuAdbReplyLength = 5;
         } else if (ev.type == sysevMouse) {
             int dx = MAX(-63, MIN(63, ev.mouse.relx));
             int dy = MAX(-63, MIN(63, ev.mouse.rely));
@@ -1477,14 +1636,26 @@ static bool doProcessCudaEvent(const SystemEvent &ev)
             dy &= 0x7f;
             if (!ev.mouse.button2) dx |= 0x80;
             if (!ev.mouse.button1) dy |= 0x80;
-            gCUDA.pmuAdbReply[0] = 0x3c;
-            gCUDA.pmuAdbReply[1] = dy;
-            gCUDA.pmuAdbReply[2] = dx;
-            gCUDA.pmuAdbReplyLength = 3;
+            /* Try the plausible encodings in turn so one boot can test them all. */
+            if (gPktVariant & 1) {
+                gCUDA.pmuAdbReply[0] = 1;
+                gCUDA.pmuAdbReply[1] = 3;
+                gCUDA.pmuAdbReply[2] = 0x3c;
+                gCUDA.pmuAdbReply[3] = dy;
+                gCUDA.pmuAdbReply[4] = dx;
+                gCUDA.pmuAdbReplyLength = 5;
+            } else {
+                gCUDA.pmuAdbReply[0] = 0x3c;
+                gCUDA.pmuAdbReply[1] = dy;
+                gCUDA.pmuAdbReply[2] = dx;
+                gCUDA.pmuAdbReplyLength = 3;
+            }
         } else {
             return false;
         }
-        gCUDA.pmuInterruptBits |= PMU_INT_ADB | PMU_INT_ADB_AUTO;
+        gAdbQueued++;
+        gCUDA.pmuInterruptBits |= PMU_INT_ADB;
+        if (!(gPktVariant & 2)) gCUDA.pmuInterruptBits |= PMU_INT_ADB_AUTO;
         pmu_update_ext_interrupt();
         return true;
     }
@@ -1573,15 +1744,75 @@ static void *cudaEventLoop(void *arg)
 		sys_unlock_mutex(gCUDAMutex);
 		if (gDebugInjectMouseMotion) {
 			gDebugInjectMouseMotion = 0;
-			for (int i = 0; i < 20; i++) {
-				SystemEvent ev = {};
-				ev.type = sysevMouse;
-				ev.mouse.type = sme_motionNotify;
-				ev.mouse.relx = 5;
-				ev.mouse.rely = 3;
-				tryProcessCudaEvent(ev);
+			gPktVariant = (gPktVariant + 1) & 3;
+			/*
+			 * Isolation: drive ONLY the USB HID mouse, and only a button --
+			 * no movement, and no ADB event alongside it.  If MBState still
+			 * flips, the guest really is processing our HID reports and motion
+			 * is specifically what it discards.  (The old loop fired 20
+			 * iterations of two 5,3 events plus an ADB packet per signal,
+			 * which both saturated the deltas and muddied the attribution.)
+			 */
+			/*
+			 * Inject a plain movement, no button held.  Kept deliberately
+			 * simple: the old form looped 20 times firing an ADB packet plus
+			 * two 5,3 events per signal, which saturated every delta at 0x7f
+			 * and made button attribution ambiguous between the ADB and USB
+			 * paths.  One explicit report per signal is what a test can reason
+			 * about.
+			 */
+			usb_hid_mouse_event(40, 24, false, false, false);
+			/*
+			 * Also press a key over USB HID.  A keyboard boot report carries
+			 * its data past byte 0 -- the same part of a mouse report that is
+			 * being discarded -- so if KeyMap reacts, the HID data path works
+			 * and the loss is specific to mouse motion; if it does not, the
+			 * problem is broader than the mouse.
+			 */
+			usb_hid_key_event(0x00, true);	/* ADB 'A' down */
+			/* (ADB key injection removed: with the ADB nodes withdrawn it cannot
+			 * reach the guest, and it made KeyMap changes ambiguous between the
+			 * ADB and USB paths.) */
+			{
+				/* Report Mac OS's own input globals so a running instance can be
+				 * probed repeatedly without rebooting: low memory sits at
+				 * physical 0x4000, RawMouse at 0x82c, KeyMap at 0x174. */
+				uint8 rm[4], km[4], mo[4], cn[2], mbs[1], mt[4], pin[8], cvis[1];
+				ppc_dma_read(rm, 0x4000 + 0x82c, 4);
+				ppc_dma_read(km, 0x4000 + 0x174, 4);
+				ppc_dma_read(mo, 0x4000 + 0x830, 4);	/* Mouse: written by the ROM */
+				ppc_dma_read(cn, 0x4000 + 0x8ce, 2);	/* CrsrNew / CrsrCouple */
+				ppc_dma_read(mbs, 0x4000 + 0x172, 1);
+				ppc_dma_read(mt, 0x4000 + 0x828, 4);	/* MTemp: raw, pre-filter */
+				ppc_dma_read(pin, 0x4000 + 0x834, 8);	/* CrsrPin rect */
+				ppc_dma_read(cvis, 0x4000 + 0x8cc, 1);	/* CrsrVis */
+				{
+					/* DTQueue (0xd92): QHdr for the Deferred Task Manager.
+					 * USBHIDDriver imports DeferUserFn, so if motion is handed
+					 * to a deferred task that never runs, entries pile up here
+					 * and qHead stays non-zero. */
+					uint8 dtq[10];
+					ppc_dma_read(dtq, 0x4000 + 0xd92, 10);
+					fprintf(stderr, "[DTQ] flags=%02x%02x head=%02x%02x%02x%02x tail=%02x%02x%02x%02x\n",
+						dtq[0],dtq[1],dtq[2],dtq[3],dtq[4],dtq[5],dtq[6],dtq[7],dtq[8],dtq[9]);
+				}
+				fprintf(stderr, "[MOUSE2] MTemp v=%d h=%d | CrsrPin t=%d l=%d b=%d r=%d | CrsrVis=%02x\n",
+					(sint16)((mt[0]<<8)|mt[1]), (sint16)((mt[2]<<8)|mt[3]),
+					(sint16)((pin[0]<<8)|pin[1]), (sint16)((pin[2]<<8)|pin[3]),
+					(sint16)((pin[4]<<8)|pin[5]), (sint16)((pin[6]<<8)|pin[7]), cvis[0]);
+				fprintf(stderr, "[MOUSE] RawMouse v=%d h=%d | Mouse v=%d h=%d | CrsrNew=%02x CrsrCouple=%02x MBState=%02x\n",
+					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
+					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]),
+					cn[0], cn[1], mbs[0]);
+				usb_debug_print();
+				gcard_debug_print();
+				fprintf(stderr, "[PROBE] variant=%d RawMouse v=%d h=%d KeyMap=%02x%02x%02x%02x | "
+				        "queued=%d delivered=%d gpioReads=%d intBits=%02x mask=%02x asserted=%d\n",
+				        gPktVariant, (rm[0] << 8) | rm[1], (rm[2] << 8) | rm[3],
+				        km[0], km[1], km[2], km[3],
+				        gAdbQueued, gAdbDelivered, gExtIntReads, gCUDA.pmuInterruptBits,
+				        gCUDA.pmuInterruptMask, cuda_pmu_extint_asserted() ? 1 : 0);
 			}
-			fprintf(stderr, "[INJECT] queued 20 motion events (+5,+3 each)\n");
 		}
 		if (gDebugInjectMouseClick) {
 			gDebugInjectMouseClick = 0;

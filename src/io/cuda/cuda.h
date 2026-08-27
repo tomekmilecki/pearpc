@@ -40,5 +40,6 @@ bool cuda_is_pmu();
 bool cuda_pmu_extint_asserted();
 void cuda_debug_inject_mouse_click();
 void cuda_debug_inject_mouse_motion();
+void cuda_debug_count_extint_read();
 
 #endif

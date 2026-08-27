@@ -23,6 +23,9 @@
 
 #include "io/pci/pci.h"
 
+/* KeyLargo feature control registers: FCR0..FCR4 plus MediaBay, at 0x38. */
+#define MACIO_FCR_COUNT 6
+
 class PCI_MacIO: public PCI_Device {
 private:
     struct ESCCChannel {
@@ -54,6 +57,7 @@ private:
     uint32 mWatchDogLow;
     uint32 mWatchDogHigh;
     uint32 mWatchDogEnable;
+    uint32 mFCR[MACIO_FCR_COUNT];
     ESCCChannel mESCCChannels[2];
     DBDMAChannel mDBDMAChannels[16];
 
