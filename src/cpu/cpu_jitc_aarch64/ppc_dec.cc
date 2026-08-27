@@ -1224,6 +1224,8 @@ void FASTCALL ppc_exec_opc(PPC_CPU_State &aCPU)
     ppc_opc_table_main[mainopc](aCPU);
 }
 
+extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &);
+
 JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
 {
     // Flush deferred CR flags before most instructions.
@@ -1232,6 +1234,23 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
     // - clobberFlags()/clobberAll(): if it destroys NZCV or dispatches
     // - flushFlags(): if it needs up-to-date CR in CPU state
     // - GEN_INTERPRET wrappers call clobberAll() via the prologue
+    /* Route the two USB HID callback loads through a traced interpreter.
+     * Chosen here, at translation time, so the instruction identity is exact. */
+    /* 0x80410014 (`lwz r2,20(r1)`) is a control: it appears in every CFM glue
+     * sequence and must fire.  If it does not, the trace mechanism is broken
+     * and a null result for the HID encodings proves nothing. */
+    /* Trace every byte load so the code that reads our HID report can be
+     * found: the parser identified by disassembly provably never runs (its
+     * encodings fired 0 times while a control fired), so the real one has to
+     * be located empirically. */
+    {
+        /* Load tracing is disabled: routing every load form through the
+         * interpreter costs roughly a 1000x slowdown and the guest cannot
+         * boot in useful time.  Kept for reference -- re-enable by restoring
+         * the dispatch below. */
+        (void)ppc_opc_hidtrace_load;
+    }
+
     uint32 mainopc = PPC_OPC_MAIN(aJITC.current_opc);
     const char *interpretMain = getenv("PPC_INTERPRET_MAIN");
     if (getenv("PPC_INTERPRET_ALL") ||

@@ -214,6 +214,9 @@ extern bool gSinglestep;
 /* Serialises register access against the frame thread. */
 extern sys_mutex gUSBRegMutex;
 extern int gUSBRegWrites, gUSBFrames, gUSBEDs, gUSBTDs, gUSBCtrl, gUSBIntIn, gUSBReports;
+int gHIDTraceArmed;
+uint32 gHIDReportBuf;
+int gHIDReportLen;
 static volatile int gUSBPendingTicks;
 extern int gUSBRegReads, gUSBIRQs, gUSBPortReads;
 extern int gUSBReadHist[64];
@@ -407,6 +410,23 @@ bool processTD(int port, uint32 td, int pid, int endpoint)
 		if (n < 0) return false;		/* NAK -- retry next frame */
 		{	/* A report actually handed to the guest. */
 			gUSBReports++;
+			/* Record exactly where this report landed, so the trace can log
+			 * only reads of these bytes rather than every byte that happens
+			 * to equal the marker. */
+			if (n > 2 && tmp[2] == 0x5a) {
+				gHIDTraceArmed = 1;
+				gHIDReportBuf = cbp;
+				gHIDReportLen = n;
+				fprintf(stderr, "[HIDARM] armed: buf=%08x len=%d bytes=%02x %02x %02x\n",
+					cbp, n, tmp[0], tmp[1], tmp[2]);
+			} else if (n > 2) {
+				static int t = 0;
+				if (t < 5) {
+					t++;
+					fprintf(stderr, "[HIDARM] NOT armed, report was %02x %02x %02x\n",
+						tmp[0], tmp[1], tmp[2]);
+				}
+			}
 			static int t = 0;
 			/* Only log reports that actually carry movement or a button --
 			 * the idle stream is all zeroes and would fill the log. */
@@ -621,6 +641,10 @@ void frameTick()
 		bool announce = false;
 		for (uint i = 0; i < rootport_count; i++) {
 			uint32 &ps = hcregs.roothub.portstatus[i];
+			/* NOTE: gating this on mDevices[i].address (skip already-enumerated
+			 * devices) was tried and is worse -- the port reset clears the
+			 * address first, so the gate never applies and the keyboard stops
+			 * enumerating entirely.  Resets went 4 -> 7. */
 			if ((ps & OHCI_RH_PS_CCS) && !(ps & OHCI_RH_PS_PES)) {
 				ps |= OHCI_RH_PS_CSC;
 				announce = true;
@@ -903,9 +927,28 @@ void	reset()
 	 * transition the driver is written to handle rather than as state that was
 	 * already there before it looked.
 	 */
-	for (uint i = 0; i < rootport_count; i++)
-		hcregs.roothub.portstatus[i] = OHCI_RH_PS_PPS;
-	mAttachDelay = -1;
+	/*
+	 * A host controller reset must NOT disturb the root hub: [1].7.1.4 says
+	 * HostControllerReset "does not affect the Root Hub and no subsequent
+	 * reset signaling shall be asserted on its downstream ports".  Devices
+	 * stay physically attached across it.  Wiping port status here made every
+	 * HCR look like an unplug followed by a replug, so the driver tore the
+	 * device down and enumerated it again -- and on the re-attach it reports
+	 * "HIDCreateCursorDevice cursor already exists", leaving the live instance
+	 * without a cursor device.  Reports still arrive (and buttons still reach
+	 * the global MBState) but motion has nowhere to go.
+	 *
+	 * So keep connect/power/speed across a reset; only the port change bits
+	 * and the enable are cleared, and an already-attached device is not
+	 * re-announced.
+	 */
+	for (uint i = 0; i < rootport_count; i++) {
+		uint32 &ps = hcregs.roothub.portstatus[i];
+		bool attached = (ps & OHCI_RH_PS_CCS) != 0 || mAttachDelay == 0;
+		ps = OHCI_RH_PS_PPS
+		   | (attached ? (OHCI_RH_PS_CCS | OHCI_RH_PS_LSDA) : 0);
+	}
+	if (mAttachDelay != 0) mAttachDelay = -1;   /* only arm the first attach */
 }
 
 virtual void readConfig(uint reg)

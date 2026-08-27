@@ -1761,7 +1761,11 @@ static void *cudaEventLoop(void *arg)
 			 * paths.  One explicit report per signal is what a test can reason
 			 * about.
 			 */
-			usb_hid_mouse_event(40, 24, false, false, false);
+			/* Distinctive deltas: dx=0x3c, dy=0x5a.  The trace below looks for
+			 * the lbz that loads 0x5a, which identifies the code actually
+			 * reading our report -- the module disassembled earlier provably
+			 * never executes. */
+			usb_hid_mouse_event(0x3c, 0x5a, false, false, false);
 			/*
 			 * Also press a key over USB HID.  A keyboard boot report carries
 			 * its data past byte 0 -- the same part of a mouse report that is

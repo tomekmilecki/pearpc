@@ -2245,6 +2245,70 @@ static void gen_ea_X(JITC &jitc, int rA, int rB)
  *  === D-form loads ===
  */
 
+/*
+ * Traced lwz, used only for the two encodings that read USBHIDMouseModule's
+ * report callback: `lwz r6,0xc0(r9)` (0x80c900c0) and `lwz r12,0xc0(r9)`
+ * (0x818900c0).  Selecting it at *translation* time is what makes this sound:
+ * the JIT knows exactly which instruction it is compiling, so there is no
+ * reliance on cpu->pc identifying the faulting load at run time -- that
+ * pairing was measured at only 6/10 correct and invalidated an earlier probe.
+ */
+extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int gHIDReportLen; }
+
+/*
+ * Traced load, used for lbz/lhz/lha/lwz.  Logs any access that falls inside
+ * the TD buffer our HID report was just written to, whatever its width -- the
+ * byte-only version found nothing because a 3-byte report is most naturally
+ * read with a word or halfword load.
+ */
+extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &aCPU)
+{
+    int rD, rA;
+    uint32 imm;
+    PPC_OPC_TEMPL_D_SImm(aCPU.current_opc, rD, rA, imm);
+    uint32 ea = (rA ? aCPU.gpr[rA] : 0) + imm;
+    uint32 opc = PPC_OPC_MAIN(aCPU.current_opc);
+    int rB = (aCPU.current_opc >> 11) & 0x1f;
+    uint32 xo = (aCPU.current_opc >> 1) & 0x3ff;
+    bool indexed = (opc == 31);
+    if (indexed) ea = (rA ? aCPU.gpr[rA] : 0) + aCPU.gpr[rB];
+    int r; uint32 v = 0; int width = 4;
+    int kind = 4;   /* 1=byte 2=half 4=word */
+    if (opc == 34 || opc == 35) kind = 1;
+    else if (opc == 40 || opc == 41 || opc == 42 || opc == 43) kind = 2;
+    else if (opc == 32 || opc == 33) kind = 4;
+    else if (indexed) {
+        if (xo == 87 || xo == 119) kind = 1;              /* lbzx  lbzux  */
+        else if (xo == 279 || xo == 311 || xo == 343 || xo == 375) kind = 2; /* lhzx lhzux lhax lhaux */
+        else kind = 4;                                    /* lwzx  lwzux  */
+    }
+    if (kind == 1)      { uint8  b; r = ppc_read_effective_byte(aCPU, ea, b); v = b; width = 1; }
+    else if (kind == 2) { uint16 h; r = ppc_read_effective_half(aCPU, ea, h); v = h; width = 2; }
+    else                { uint32 w; r = ppc_read_effective_word(aCPU, ea, w); v = w; width = 4; }
+    if (r == PPC_MMU_OK) {
+        aCPU.gpr[rD] = v;
+        /*
+         * Compare in the PHYSICAL address space.  The TD's buffer pointer is
+         * physical (OHCI DMA), while `ea` here is the guest's effective
+         * address -- comparing the two directly can only match by accident,
+         * which is why this trace read zero until now.
+         */
+        uint32 tpa;
+        if (gHIDTraceArmed && gHIDReportBuf
+            && ppc_effective_to_physical(aCPU, ea, PPC_MMU_READ, tpa) == PPC_MMU_OK
+            && tpa + (uint32)width > gHIDReportBuf
+            && tpa < gHIDReportBuf + (uint32)gHIDReportLen) {
+            static int t = 0;
+            if (t < 12) {
+                t++;
+                fprintf(stderr, "[HIDBYTE] pc=%08x insn=%08x ea=%08x pa=%08x (buf+%d w%d) val=%08x r2=%08x\n",
+                        aCPU.pc, aCPU.current_opc, ea, tpa, (int)(tpa - gHIDReportBuf), width, v, aCPU.gpr[2]);
+            }
+        }
+    }
+    return r;
+}
+
 JITCFlow ppc_opc_gen_lwz(JITC &jitc)
 {
     int rD, rA;
