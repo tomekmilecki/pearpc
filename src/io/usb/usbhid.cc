@@ -83,20 +83,15 @@ static const uint8 gMouseReport[] = {
 	0x15, 0x81,		/*     Logical Minimum (-127)		*/
 	0x25, 0x7f,		/*     Logical Maximum (127)		*/
 	/*
-	 * Declare a physical range and unit as well.  Without them the device's
-	 * resolution is undefined, and the Cursor Device Manager -- which is the
-	 * one path that fails, while everything writing a low-memory global works
-	 * -- scales motion by units-per-inch.  Physical == logical with an inch
-	 * unit gives a plain 1:1 mapping.
+	 * No Physical/Unit items: declaring physical == logical with an inch unit
+	 * works out to one count per inch, which is nonsense for a mouse (real
+	 * ones are ~400) and is worse than leaving resolution undefined.  Real
+	 * Apple mice omit these too, and the guest parses this descriptor for
+	 * real now -- it selects report protocol (SET_PROTOCOL wValue=1).
 	 */
-	0x35, 0x81,		/*     Physical Minimum (-127)		*/
-	0x45, 0x7f,		/*     Physical Maximum (127)		*/
-	0x65, 0x13,		/*     Unit (English Linear, inch)	*/
-	0x55, 0x00,		/*     Unit Exponent (0)		*/
 	0x75, 0x08,		/*     Report Size (8)			*/
 	0x95, 0x02,		/*     Report Count (2)			*/
 	0x81, 0x06,		/*     Input (Data, Variable, Relative)	*/
-	0x65, 0x00,		/*     Unit (None) -- close the unit	*/
 	0xc0,			/*   End Collection			*/
 	0xc0			/* End Collection			*/
 };
@@ -216,6 +211,14 @@ int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 			d.idle = wValue >> 8;
 			return 0;
 		case REQ_HID_SET_PROTOCOL:
+			/*
+			 * Accept both protocols.  A boot-subclass device is required to
+			 * support report protocol as well ([HID1.11].7.2.6), and the guest
+			 * does select it (SET_PROTOCOL wValue=1).  Stalling it was tried
+			 * -- the device still enumerated and reports still flowed, but the
+			 * cursor did not move and refusing is simply non-compliant.
+			 * The report layout we emit matches the descriptor either way.
+			 */
 			d.protocol = wValue & 0xff;
 			return 0;
 		case REQ_HID_GET_PROTOCOL:
