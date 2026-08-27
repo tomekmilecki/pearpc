@@ -276,7 +276,16 @@ int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 			/* index 0 is the language list, everything else a short label */
 			static const uint8 lang[] = { 4, DESC_STRING, 0x09, 0x04 };
 			if ((wValue & 0xff) == 0) return copyOut(data, want, lang, sizeof lang);
-			const char *s = d.isKeyboard ? "Keyboard" : "Mouse";
+			/* Index 1 is iManufacturer and 2 is iProduct (see the device
+			 * descriptors); returning the same text for both left the Name
+			 * Registry with MfgStr == ProductStr, which is wrong and may
+			 * matter to a host that compares them. */
+			const char *s;
+			switch (wValue & 0xff) {
+			case 1:  s = "Apple Computer, Inc."; break;
+			case 2:  s = d.isKeyboard ? "Apple Keyboard" : "Apple Optical USB Mouse"; break;
+			default: s = d.isKeyboard ? "Keyboard" : "Mouse"; break;
+			}
 			int n = (int)strlen(s);
 			uint8 buf[2 + 32 * 2];
 			buf[0] = (uint8)(2 + n * 2);

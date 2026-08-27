@@ -365,7 +365,7 @@ bool processTD(int port, uint32 td, int pid, int endpoint)
 			int n = usbhid_control(d, c.setup, c.buf, sizeof c.buf);
 			{	/* Which request does the guest give up on? */
 				static int t = 0;
-				if (t < 40) {
+				if (t < 90) {
 					t++;
 					fprintf(stderr, "[USB-CTRL] port%d bmRT=%02x bReq=%02x "
 						"wVal=%04x wIdx=%04x wLen=%d -> %d%s\n",
@@ -801,9 +801,9 @@ void writePortStatus(uint port, uint32 data)
 			ps |= OHCI_RH_PS_PRSC;
 			{
 				static int t = 0;
-				if (t < 12) {
+				if (t < 30) {
 					t++;
-					fprintf(stderr, "[USB-RESET] port%u reset, address %d -> 0\n",
+					fprintf(stderr, "[USB-RESET] >>> port%u reset, address %d -> 0\n",
 						port, mDevices[port].address);
 				}
 			}
