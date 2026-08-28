@@ -1288,8 +1288,11 @@ static void *usbFrameLoop(void *)
 	return NULL;
 }
 
+unsigned long gMouseEventCalls = 0;	/* survives usbhid_init(), unlike per-device counters */
+
 void usb_hid_mouse_event(int dx, int dy, bool button1, bool button2, bool button3)
 {
+	gMouseEventCalls++;
 	if (!gUSB) return;
 	sys_lock_mutex(gUSBMutex);
 	usbhid_mouse_event(gUSB->mDevices[USBHID_PORT_MOUSE], dx, dy, button1, button2, button3);
@@ -1329,6 +1332,24 @@ void usb_debug_print()
 		gUSBWriteHist[best] = 0;
 	}
 	fprintf(stderr, "\n");
+	{
+		/* Per-device traffic.  The mouse is inert while the keyboard works, so
+		 * say whether the guest ever configured and polled the mouse at all --
+		 * a driver that never bound it would leave these at zero. */
+		USBHIDDevice &m = gUSB->mDevices[USBHID_PORT_MOUSE];
+		USBHIDDevice &k = gUSB->mDevices[USBHID_PORT_KEYBOARD];
+		for (unsigned ci = 0; ci < gMouseCtrlCount; ci++) {
+			USBHIDCtrlRec &r = gMouseCtrlLog[ci];
+			fprintf(stderr, "[MCTRL] %02x %02x wValue=%04x wIndex=%04x wLength=%d%s\n",
+				r.bmRequestType, r.bRequest, r.wValue, r.wIndex, r.wLength,
+				(r.wValue >> 8) == 0x22 ? "   <== REPORT DESCRIPTOR" : "");
+		}
+		fprintf(stderr, "[HIDDEV] hostMouseCalls=%lu (survives re-init)\n", gMouseEventCalls);
+		fprintf(stderr, "[HIDDEV] mouse: addr=%d cfg=%d proto=%d idle=%d ctrl=%lu setProto=%lu setIdle=%lu polls=%lu reports=%lu events=%lu drains=%lu\n",
+			m.address, m.config, m.protocol, m.idle, m.ctrlReqs, m.setProtocol, m.setIdle, m.intPolls, m.reportsOut, m.eventsIn, m.getReportDrains);
+		fprintf(stderr, "[HIDDEV] keybd: addr=%d cfg=%d proto=%d idle=%d ctrl=%lu setProto=%lu setIdle=%lu polls=%lu reports=%lu events=%lu drains=%lu\n",
+			k.address, k.config, k.protocol, k.idle, k.ctrlReqs, k.setProtocol, k.setIdle, k.intPolls, k.reportsOut, k.eventsIn, k.getReportDrains);
+	}
 	fprintf(stderr, "[USB] regWrites=%d frames=%d EDs=%d TDs=%d ctrl=%d intIn=%d "
 		"reports=%d regReads=%d portReads=%d irqs=%d intrSt=%08x intrEn=%08x "
 		"ctrl_reg=%08x hcca=%08x ctrlHead=%08x port0=%08x port1=%08x addr0=%d addr1=%d\n",

@@ -1757,9 +1757,36 @@ static void *cudaEventLoop(void *arg)
 			 * cadence, totalling (200,150).  A real trackpad moves the
 			 * cursor this way; the previous single (60,90) jump was not a
 			 * fair test of the guest's motion handling. */
+			/* NOTE: do not call cudaEventHandler() from this thread -- it
+			 * takes gCUDAEventSem, which cudaEventLoop already holds, and the
+			 * recursive lock deadlocks the loop.  Real input is fine: it
+			 * arrives on the SDL thread.  Drive the USB device directly. */
 			if (gKeyScript < 400 && (gKeyScript % 8) == 0)
 				usb_hid_mouse_event(4, 3, false, false, false);
-			if (gKeyScript >= 500) gKeyScript = -2;			/* done */
+			/*
+			 * Then hold the button ~160ms and sample MBState *during* the
+			 * hold.  Every probe so far read MBState after the release, so
+			 * "80" (up) was the only value it could ever have shown -- the
+			 * claim that buttons work rests on the same back-to-back
+			 * press/release defect that hid every keystroke.  Sampling
+			 * mid-hold says whether the mouse device works at all, or
+			 * whether only motion is being discarded.
+			 */
+			if (gKeyScript == 600)
+				usb_hid_mouse_event(0, 0, true, false, false);
+			if (gKeyScript == 500 || gKeyScript == 700) {
+				uint8 mb = 0, rm[4] = {0,0,0,0}, mo[4] = {0,0,0,0};
+				ppc_dma_read(&mb, LOMEM_BASE + 0x172, 1);
+				ppc_dma_read(rm, LOMEM_BASE + 0x82c, 4);
+				ppc_dma_read(mo, LOMEM_BASE + 0x830, 4);
+				fprintf(stderr, "[BTN] %s MBState=%02x RawMouse v=%d h=%d Mouse v=%d h=%d\n",
+					gKeyScript == 500 ? "after-motion  " : "button-HELD   ", mb,
+					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
+					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]));
+			}
+			if (gKeyScript == 760)
+				usb_hid_mouse_event(0, 0, false, false, false);
+			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
 		if (gDebugInjectMouseMotion) {

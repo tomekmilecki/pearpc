@@ -29,6 +29,14 @@
 #define USBHID_PORT_KEYBOARD  1
 #define USBHID_PORT_COUNT     2
 
+#define USBHID_CTRLLOG 48
+struct USBHIDCtrlRec {
+	uint8	bmRequestType, bRequest;
+	uint16	wValue, wIndex, wLength;
+};
+extern USBHIDCtrlRec gMouseCtrlLog[USBHID_CTRLLOG];
+extern unsigned gMouseCtrlCount;
+
 struct USBHIDDevice {
 	bool	isKeyboard;
 	uint8	address;		/* address assigned by SET_ADDRESS */
@@ -44,6 +52,17 @@ struct USBHIDDevice {
 	uint8	modifiers;
 	uint8	keys[6];
 	bool	reportPending;
+
+	/* Does the guest actually drive this device?  The mouse does nothing
+	 * while the keyboard works, so count per-device traffic to tell whether
+	 * a driver ever bound the mouse interface at all. */
+	unsigned long ctrlReqs;		/* control transfers received */
+	unsigned long setProtocol;	/* SET_PROTOCOL requests */
+	unsigned long setIdle;		/* SET_IDLE requests */
+	unsigned long intPolls;		/* interrupt-IN polls */
+	unsigned long reportsOut;	/* reports actually returned */
+	unsigned long eventsIn;		/* host input events accepted */
+	unsigned long getReportDrains;	/* control GET_REPORT that consumed input */
 };
 
 void usbhid_init(USBHIDDevice *devs);

@@ -18,6 +18,7 @@
  *	GNU General Public License for more details.
  */
 
+#include <stdio.h>
 #include "usbhid.h"
 
 #include <cstring>
@@ -183,8 +184,17 @@ static const uint8 gKeyboardCfgDesc[] = {
 	7, 5, 0x81, 3, 8, 0, 10
 };
 
+USBHIDCtrlRec gMouseCtrlLog[USBHID_CTRLLOG];
+unsigned gMouseCtrlCount = 0;
+
 void usbhid_init(USBHIDDevice *devs)
 {
+	/* This wipes reportPending/dx/dy along with everything else, so any input
+	 * accumulated but not yet collected is destroyed.  Say when it happens. */
+	{
+		static unsigned long inits = 0;
+		fprintf(stderr, "[HIDINIT] usbhid_init #%lu -- device state wiped\n", ++inits);
+	}
 	memset(devs, 0, sizeof(USBHIDDevice) * USBHID_PORT_COUNT);
 	devs[USBHID_PORT_MOUSE].isKeyboard = false;
 	devs[USBHID_PORT_KEYBOARD].isKeyboard = true;
@@ -199,6 +209,20 @@ static int copyOut(uint8 *dst, int maxlen, const uint8 *src, int len)
 
 int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 {
+	d.ctrlReqs++;
+	if (setup[1] == 0x0b) d.setProtocol++;	/* SET_PROTOCOL */
+	if (setup[1] == 0x0a) d.setIdle++;	/* SET_IDLE */
+	if (!d.isKeyboard && gMouseCtrlCount < USBHID_CTRLLOG) {
+		/* Record, do not print.  fprintf() here is synchronous I/O inside the
+		 * emulated control path and perturbs enumeration timing badly enough
+		 * to wedge the boot; usb_debug_print() dumps this on demand instead. */
+		USBHIDCtrlRec &r = gMouseCtrlLog[gMouseCtrlCount++];
+		r.bmRequestType = setup[0];
+		r.bRequest      = setup[1];
+		r.wValue        = (uint16)(setup[2] | (setup[3] << 8));
+		r.wIndex        = (uint16)(setup[4] | (setup[5] << 8));
+		r.wLength       = (uint16)(setup[6] | (setup[7] << 8));
+	}
 	const uint8 bmRequestType = setup[0];
 	const uint8 bRequest = setup[1];
 	const uint16 wValue = setup[2] | (setup[3] << 8);
@@ -244,6 +268,7 @@ int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 				if (n > 2) data[2] = (uint8)(d.dy < -127 ? -127 : d.dy > 127 ? 127 : d.dy);
 				d.dx = d.dy = 0;
 				d.reportPending = false;
+				d.getReportDrains++;
 			}
 			return n;
 		}
@@ -332,6 +357,7 @@ int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 
 int usbhid_interrupt_in(USBHIDDevice &d, uint8 *buf, int maxlen)
 {
+	d.intPolls++;
 	/*
 	 * Honour SET_IDLE: a non-zero idle duration obliges the device to report
 	 * even when nothing has changed ([HID1.11].7.2.4), and Mac OS asks for
@@ -352,6 +378,7 @@ int usbhid_interrupt_in(USBHIDDevice &d, uint8 *buf, int maxlen)
 		d.idleCount = 0;
 	}
 
+	d.reportsOut++;
 	if (d.isKeyboard) {
 		int n = maxlen < 8 ? maxlen : 8;
 		memset(buf, 0, n);
@@ -385,6 +412,7 @@ void usbhid_mouse_event(USBHIDDevice &d, int dx, int dy, bool b1, bool b2, bool 
 	if (d.dy < -1023) d.dy = -1023;
 	d.buttons = (uint8)((b1 ? 1 : 0) | (b2 ? 2 : 0) | (b3 ? 4 : 0));
 	d.reportPending = true;
+	d.eventsIn++;
 }
 
 /*
