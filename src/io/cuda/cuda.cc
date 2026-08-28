@@ -2019,6 +2019,20 @@ static void *cudaEventLoop(void *arg)
 					ppc_dma_read(q, LOMEM_BASE + 0x160, 10);
 					uint32 head = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
 					uint32 tail = ((uint32)q[6]<<24)|((uint32)q[7]<<16)|((uint32)q[8]<<8)|q[9];
+					if (head) {
+						/*
+						 * VBLQueue (0x160) is the SYSTEM VBL queue, serviced by
+						 * the 60Hz tick -- not by the video card's VBL.  Ticks
+						 * advances at 60.6Hz, so that handler runs; if these
+						 * tasks are being serviced their vblCount decrements,
+						 * and the video interrupt is irrelevant to the cursor.
+						 * VBLTask: qLink(4) qType(2) vblAddr(4) vblCount(2).
+						 */
+						uint8 t[12] = {0};
+						ppc_dma_read(t, head, 12);
+						fprintf(stderr, "[VBLT] task@%08x vblAddr=%02x%02x%02x%02x vblCount=%02x%02x\n",
+							head, t[6], t[7], t[8], t[9], t[10], t[11]);
+					}
 					fprintf(stderr, "[VBLQ] flags=%02x%02x qHead=%08x qTail=%08x -- %s\n",
 						q[0], q[1], head, tail,
 						head ? "tasks INSTALLED (starved of VBL)"
