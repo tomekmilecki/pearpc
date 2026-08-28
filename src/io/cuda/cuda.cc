@@ -2224,18 +2224,42 @@ static void *cudaEventLoop(void *arg)
 			 * only keeps the latest button state, coalesced them away -- no
 			 * edge, no event.
 			 */
-			/* Press a key first: its PostEvent works, so the record it
-			 * creates shows where the real queue lives. */
-			static uint64 keyAt = 0;
-			if (gKeyScript == 200 && !keyAt) {
-				keyAt = sys_get_hiresclk_ticks();
-				usb_hid_key_event(0x00, true);		/* ADB 'A' */
+			/*
+			 * Easy Access "Mouse Keys": Cmd-Shift-Clear toggles it, then
+			 * keypad 5 is a click.  It posts real mouse events through
+			 * PostEvent -- the path the keyboard already proves works --
+			 * so it sidesteps the dead CursorDeviceManager/VBL chain
+			 * entirely.  Driven purely over the working keyboard.
+			 */
+			static uint64 mkAt = 0;
+			static int mkPhase = 0;
+			if (gKeyScript == 200 && mkPhase == 0) {
+				mkPhase = 1;
+				mkAt = sys_get_hiresclk_ticks();
+				usb_hid_key_event(0x37, true);		/* Command */
+				usb_hid_key_event(0x38, true);		/* Shift   */
+				usb_hid_key_event(0x47, true);		/* keypad Clear */
+				fprintf(stderr, "[MKEYS] Cmd-Shift-Clear down\n");
 			}
-			if (keyAt && sys_get_hiresclk_ticks() - keyAt >
-			             sys_get_hiresclk_ticks_per_second() / 4) {
-				keyAt = 0;
-				usb_hid_key_event(0x00, false);
-				fprintf(stderr, "[CLICK] key A released\n");
+			if (mkPhase && mkAt) {
+				uint64 per = sys_get_hiresclk_ticks_per_second();
+				uint64 el = sys_get_hiresclk_ticks() - mkAt;
+				if (mkPhase == 1 && el > per / 4) {
+					mkPhase = 2;
+					usb_hid_key_event(0x47, false);
+					usb_hid_key_event(0x38, false);
+					usb_hid_key_event(0x37, false);
+					fprintf(stderr, "[MKEYS] released; Mouse Keys should be ON\n");
+				} else if (mkPhase == 2 && el > per) {
+					mkPhase = 3;
+					usb_hid_key_event(0x57, true);	/* keypad 5 = click */
+					fprintf(stderr, "[MKEYS] keypad 5 (click) down\n");
+				} else if (mkPhase == 3 && el > per + per / 4) {
+					mkPhase = 4;
+					mkAt = 0;
+					usb_hid_key_event(0x57, false);
+					fprintf(stderr, "[MKEYS] keypad 5 released\n");
+				}
 			}
 			static uint64 pressedAt = 0;
 			if (gKeyScript == 420 && !pressedAt) {
