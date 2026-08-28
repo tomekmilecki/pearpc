@@ -1678,7 +1678,17 @@ static volatile int gShimPending;
  * (0x830) and its USB HID driver applies our button byte but silently drops
  * the motion bytes, so nothing else moves it.
  */
-static int gCudaShimEnabled = 1;	/* CONCLUSIVELY dead: with Mouse(0x830) reading 460,12 the arrow still drew at 15,15 -- Mac OS 9 keeps the drawn cursor in Cursor Manager private state, reachable only via CursorDeviceMove */
+/*
+ * Enabled: this is what moves the pointer now.  The old comment here called
+ * the shim "conclusively dead" because writing Mouse(0x830) did not move the
+ * *drawn* arrow -- true, but the wrong conclusion.  Mac OS keeps the drawn
+ * cursor in Cursor Manager state that only the VBL cursor task updates, and
+ * that task never runs (see video.x: its interrupt install is unreachable).
+ * PearPC draws the pointer itself in SDLSystemDisplay::displayShow(), so the
+ * shim's job is to keep Mac OS's own globals correct -- which it does, and
+ * GetMouse()/Button() inside the guest now see the right position.
+ */
+static int gCudaShimEnabled = 1;
 /*
  * Post a mouse event into Mac OS's OS event queue, the way PostEvent does.
  *
