@@ -34,6 +34,7 @@
 #include "system/sysvaccel.h"
 #include "system/types.h"
 
+#include "cpu/mem.h"
 #include "tools/data.h"
 #include "tools/debug.h"
 #include "tools/snprintf.h"
@@ -127,6 +128,7 @@ void SDLSystemDisplay::displayShow()
 		healFrameBuffer();
 		sys_convert_display(mClientChar, mSDLChar, gFrameBuffer,
 			mSDLFrameBuffer, 0, mClientChar.height - 1);
+		drawCursorOverlay();
 		SDL_UpdateTexture(gSDLTexture, NULL, mSDLFrameBuffer,
 			mClientChar.width * mSDLChar.bytesPerPixel);
 	}
@@ -139,6 +141,94 @@ void SDLSystemDisplay::displayShow()
 	SDL_RenderPresent(gSDLRenderer);
 
 	sys_unlock_mutex(mRedrawMutex);
+}
+
+
+/*
+ * Composite the pointer ourselves.
+ *
+ * Mac OS normally draws the cursor from a VBL task, but the injected video.x
+ * can never deliver VBL: the call that claims the display interrupt sits behind
+ * a flag in the driver's globals that nothing in the image ever sets, so it is
+ * unreachable dead code, and the driver does not even import
+ * VSLDoInterruptService.  The guest therefore never redraws the pointer,
+ * whichever transport delivers the motion.
+ *
+ * The CUDA shim keeps Mac OS's own globals correct (RawMouse, Mouse, MTemp,
+ * MBState, clamped to CrsrPin), so GetMouse() and Button() see the right
+ * thing; this draws what those globals say, using the guest's real cursor
+ * bitmap from TheCrsr when it looks sane and a built-in arrow otherwise.
+ */
+void SDLSystemDisplay::drawCursorOverlay()
+{
+	if (!mSDLFrameBuffer) return;
+
+	uint8 mo[4];
+	if (!ppc_dma_read(mo, 0x4000 + 0x830, 4)) return;	/* Mouse */
+	int cy = (sint16)((mo[0] << 8) | mo[1]);
+	int cx = (sint16)((mo[2] << 8) | mo[3]);
+
+	uint8 vis = 1;
+	ppc_dma_read(&vis, 0x4000 + 0x8cc, 1);			/* CrsrVis */
+	if (!vis) return;
+
+	/* TheCrsr: data[32] mask[32] hotSpot(v,h) */
+	uint8 c[68];
+	bool haveCrsr = ppc_dma_read(c, 0x4000 + 0x844, 68);
+	uint16 data[16], mask[16];
+	int hy = 0, hx = 0;
+	bool sane = false;
+	if (haveCrsr) {
+		int maskBits = 0;
+		for (int i = 0; i < 16; i++) {
+			data[i] = (uint16)((c[i*2] << 8) | c[i*2+1]);
+			mask[i] = (uint16)((c[32+i*2] << 8) | c[32+i*2+1]);
+			for (int b = 0; b < 16; b++) if (mask[i] & (1 << b)) maskBits++;
+		}
+		hy = (sint16)((c[64] << 8) | c[65]);
+		hx = (sint16)((c[66] << 8) | c[67]);
+		sane = maskBits > 4 && maskBits < 250 &&
+		       hy >= 0 && hy < 16 && hx >= 0 && hx < 16;
+	}
+	if (!sane) {
+		/* Built-in arrow, so a garbled TheCrsr never leaves the user blind. */
+		static const uint16 aData[16] = {
+			0x0000,0x4000,0x6000,0x7000,0x7800,0x7c00,0x7e00,0x7f00,
+			0x7f80,0x7c00,0x6c00,0x4600,0x0600,0x0300,0x0300,0x0000 };
+		static const uint16 aMask[16] = {
+			0xc000,0xe000,0xf000,0xf800,0xfc00,0xfe00,0xff00,0xff80,
+			0xffc0,0xffc0,0xfe00,0xef00,0xcf00,0x8780,0x0780,0x0380 };
+		for (int i = 0; i < 16; i++) { data[i] = aData[i]; mask[i] = aMask[i]; }
+		hy = hx = 0;
+	}
+
+	{
+		static int n = 0;
+		if (n < 8) {
+			n++;
+			fprintf(stderr, "[OVL] draw at (%d,%d) vis=%d sane=%d bpp=%d "
+				"clientBpp=%d W=%d H=%d fb=%p\n",
+				cx, cy, (int)vis, (int)sane, mSDLChar.bytesPerPixel,
+				mClientChar.bytesPerPixel, mClientChar.width,
+				mClientChar.height, (void *)mSDLFrameBuffer);
+		}
+	}
+	const int bpp = mSDLChar.bytesPerPixel;
+	const int W = mClientChar.width, H = mClientChar.height;
+	uint8 *fb = (uint8 *)mSDLFrameBuffer;
+	for (int row = 0; row < 16; row++) {
+		int y = cy - hy + row;
+		if (y < 0 || y >= H) continue;
+		for (int col = 0; col < 16; col++) {
+			if (!(mask[row] & (0x8000 >> col))) continue;
+			int x = cx - hx + col;
+			if (x < 0 || x >= W) continue;
+			bool black = (data[row] & (0x8000 >> col)) != 0;
+			uint8 *px = fb + (size_t)y * W * bpp + (size_t)x * bpp;
+			uint32 v = black ? 0x00000000u : 0xffffffffu;
+			for (int b = 0; b < bpp; b++) px[b] = (uint8)(v >> (8 * b));
+		}
+	}
 }
 
 void SDLSystemDisplay::convertCharacteristicsToHost(DisplayCharacteristics &aHostChar, const DisplayCharacteristics &aClientChar)

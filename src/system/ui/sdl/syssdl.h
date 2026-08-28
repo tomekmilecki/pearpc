@@ -37,6 +37,7 @@ protected:
 	bool			mChangingScreen;
 	sys_mutex		mRedrawMutex;
 	SDL_Cursor *		mVisibleCursor;
+	void			drawCursorOverlay();
 	SDL_Cursor *		mInvisibleCursor;
 
 	uint bitsPerPixelToXBitmapPad(uint bitsPerPixel);

@@ -1629,7 +1629,7 @@ static volatile int gShimPending;
  * (0x830) and its USB HID driver applies our button byte but silently drops
  * the motion bytes, so nothing else moves it.
  */
-static int gCudaShimEnabled = 0;	/* CONCLUSIVELY dead: with Mouse(0x830) reading 460,12 the arrow still drew at 15,15 -- Mac OS 9 keeps the drawn cursor in Cursor Manager private state, reachable only via CursorDeviceMove */
+static int gCudaShimEnabled = 1;	/* CONCLUSIVELY dead: with Mouse(0x830) reading 460,12 the arrow still drew at 15,15 -- Mac OS 9 keeps the drawn cursor in Cursor Manager private state, reachable only via CursorDeviceMove */
 static void cuda_shim_write(int dx, int dy, bool button);
 
 void cuda_shim_mouse(int dx, int dy, bool button)
@@ -1871,7 +1871,12 @@ static void *cudaEventLoop(void *arg)
 			 * normal cursor environment; this gets to the desktop first.
 			 */
 			if (gKeyScript < 400 && (gKeyScript % 8) == 0) {
-				usb_hid_mouse_event(6, 4, false, false, false);
+				/* Drive toward the login window's "Log in" button, then
+				 * click it: if MBState alone is enough, the UI reacts and no
+				 * event posting is needed; if not, the Event Manager must be
+				 * fed directly. */
+				usb_hid_mouse_event(11, 8, false, false, false);
+				cuda_shim_mouse(11, 8, false);
 				/*
 				 * Also drive the ADB/CUDA mouse path.  The previous "restore
 				 * the ADB nodes" test injected only over USB, so it never
@@ -1888,6 +1893,16 @@ static void *cudaEventLoop(void *arg)
 				mev.mouse.rely = 4;
 				tryProcessCudaEvent(mev);
 			}
+			if (gKeyScript == 420) {			/* button down */
+				usb_hid_mouse_event(0, 0, true, false, false);
+				cuda_shim_mouse(0, 0, true);
+				fprintf(stderr, "[CLICK] button DOWN\n");
+			}
+			if (gKeyScript == 560) {			/* button up */
+				usb_hid_mouse_event(0, 0, false, false, false);
+				cuda_shim_mouse(0, 0, false);
+				fprintf(stderr, "[CLICK] button UP\n");
+			}
 			if (gKeyScript == 500) {
 				/*
 				 * Does the VBL cursor task run at all?  On Mac OS 9 input sets
@@ -1901,8 +1916,8 @@ static void *cudaEventLoop(void *arg)
 				 */
 				uint8 one = 1;
 				uint8 pt[4] = { 0, 200, 1, 44 };	/* v=200, h=300 */
-				ppc_dma_write(LOMEM_BASE + 0x82c, pt, 4);	/* RawMouse */
-				ppc_dma_write(LOMEM_BASE + 0x8ce, &one, 1);	/* CrsrNew  */
+				/* (RawMouse write disabled: the shim owns it now) */
+				(void)one;
 				fprintf(stderr, "[CRSR] set RawMouse=(200,300) CrsrNew=1\n");
 			}
 			if (gKeyScript == 650 || gKeyScript == 880) {
