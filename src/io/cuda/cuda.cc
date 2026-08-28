@@ -553,6 +553,7 @@ static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 #define CLICK_RING 16
 static volatile int gClickRing[CLICK_RING];
 static volatile int gClickHead = 0, gClickTail = 0;
+uint32 gLastPostedEl = 0;
 
 static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown);
 static int gKeyScript = -1;
@@ -1775,6 +1776,7 @@ static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
 		if (!ppc_dma_write(LOMEM_BASE + 0x14a + 2, link, 4)) return false;	/* qHead */
 	}
 	if (!ppc_dma_write(LOMEM_BASE + 0x14a + 6, link, 4)) return false;	/* qTail */
+	gLastPostedEl = el;
 	{
 		static int n = 0;
 		if (n < 12) {
@@ -1840,7 +1842,39 @@ static void cuda_shim_apply()
 	 * queue is empty, so a press stays pending until the OS has taken the
 	 * previous event, which serialises press and release naturally.
 	 */
-	static const int clickEventsOff = getenv("PEARPC_NO_CLICK_EVENTS") ? 1 : 0;
+	/*
+	 * Does Mac OS ever take these records off the queue?  If qHead stays at
+	 * whatever we linked, the OS is not draining and the events are inert --
+	 * which would explain the login list not reacting despite both a
+	 * mouseDown and a mouseUp being queued at the right coordinates.
+	 */
+	{
+		static uint32 lastPosted = 0;
+		static int samples = 0;
+		extern uint32 gLastPostedEl;
+		if (gLastPostedEl && samples < 10) {
+			uint8 q[10];
+			if (ppc_dma_read(q, LOMEM_BASE + 0x14a, 10)) {
+				uint32 hd = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
+				if (hd != lastPosted) {
+					lastPosted = hd;
+					samples++;
+					fprintf(stderr, "[DRAIN] qHead=%08x (posted %08x) -> %s\n",
+						hd, gLastPostedEl,
+						hd == 0 ? "DRAINED by Mac OS" : "still queued");
+				}
+			}
+		}
+	}
+	/*
+	 * OFF by default: it does not work.  Mac OS never dequeues what we post --
+	 * qHead stays pinned at the element we linked and never returns to zero --
+	 * so the low-memory EventQueue (0x14a) is vestigial on Mac OS 9/PowerPC and
+	 * the native Event Manager does not read it.  The records just accumulate.
+	 * Kept behind PEARPC_CLICK_EVENTS=1 so the experiment is one env var away,
+	 * but writing into guest memory for no benefit is not worth the risk.
+	 */
+	static const int clickEventsOff = getenv("PEARPC_CLICK_EVENTS") ? 0 : 1;
 	if (!clickEventsOff && gClickHead != gClickTail) {
 		uint8 mo[4];
 		if (ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4)) {
