@@ -495,6 +495,18 @@ void gcard_debug_print()
 {
 	fprintf(stderr, "[VBL] raiseCalls=%u vblOn=%d osi39Calls=%u forced=%d\n",
 		gVBLRaises, (int)gVBLon, gVBLCtrlCalls, (int)gVBLForce);
+	{
+		/* Is IRQ 23 (the video card) actually unmasked in the PIC?  The VBL
+		 * cursor task never runs, and if Mac OS never enabled this line then
+		 * every raise above is discarded and no VBL ever reaches the guest. */
+		extern uint32 PIC_enable_low, PIC_enable_high;
+		fprintf(stderr, "[VBL] PIC_enable_low=%08x high=%08x -- IRQ%d %s\n",
+			PIC_enable_low, PIC_enable_high, IO_PIC_IRQ_GCARD,
+			(IO_PIC_IRQ_GCARD < 32
+				? (PIC_enable_low  & (1U << IO_PIC_IRQ_GCARD))
+				: (PIC_enable_high & (1U << (IO_PIC_IRQ_GCARD - 32))))
+				? "ENABLED" : "<== MASKED OFF, no VBL can reach the guest");
+	}
 	/*
 	 * Is the guest's UI actually alive?  Ticks advancing only proves the timer
 	 * interrupt fires -- it would keep counting with Mac OS wedged.  Checksum

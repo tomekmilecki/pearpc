@@ -1792,6 +1792,35 @@ static void *cudaEventLoop(void *arg)
 				mev.mouse.rely = 4;
 				tryProcessCudaEvent(mev);
 			}
+			if (gKeyScript == 500) {
+				/*
+				 * Does the VBL cursor task run at all?  On Mac OS 9 input sets
+				 * RawMouse and CrsrNew, and a VBL task then copies RawMouse
+				 * into Mouse and redraws.  Set them ourselves: if the task is
+				 * alive it clears CrsrNew and Mouse follows.  If CrsrNew stays
+				 * 1 the task never runs, which would leave the pointer inert
+				 * no matter which transport delivers input -- exactly what we
+				 * see -- while the keyboard, posted directly at interrupt
+				 * time, keeps working.
+				 */
+				uint8 one = 1;
+				uint8 pt[4] = { 0, 200, 1, 44 };	/* v=200, h=300 */
+				ppc_dma_write(LOMEM_BASE + 0x82c, pt, 4);	/* RawMouse */
+				ppc_dma_write(LOMEM_BASE + 0x8ce, &one, 1);	/* CrsrNew  */
+				fprintf(stderr, "[CRSR] set RawMouse=(200,300) CrsrNew=1\n");
+			}
+			if (gKeyScript == 650 || gKeyScript == 880) {
+				uint8 cn[2] = {0,0}, rm[4] = {0,0,0,0}, mo[4] = {0,0,0,0};
+				ppc_dma_read(cn, LOMEM_BASE + 0x8ce, 2);
+				ppc_dma_read(rm, LOMEM_BASE + 0x82c, 4);
+				ppc_dma_read(mo, LOMEM_BASE + 0x830, 4);
+				fprintf(stderr, "[CRSR] t=%d CrsrNew=%02x Couple=%02x RawMouse=(%d,%d) Mouse=(%d,%d) %s\n",
+					gKeyScript, cn[0], cn[1],
+					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
+					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]),
+					cn[0] ? "<== CrsrNew NOT cleared: VBL cursor task not running"
+					      : "(cleared: task ran)");
+			}
 			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
