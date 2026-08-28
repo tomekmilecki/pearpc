@@ -1767,15 +1767,9 @@ static void *cudaEventLoop(void *arg)
 			 * ran on the Multiple Users login screen, which may not run a
 			 * normal cursor environment; this gets to the desktop first.
 			 */
-			switch (gKeyScript) {
-			case    0: usb_hid_key_event(0x24, true);  break;	/* Return  */
-			case  120: usb_hid_key_event(0x24, false); break;
-			case 1200: usb_hid_key_event(0x24, true);  break;	/* Return  */
-			case 1320: usb_hid_key_event(0x24, false); break;
-			}
-			if (gKeyScript >= 2400 && gKeyScript < 2800 && (gKeyScript % 8) == 0)
+			if (gKeyScript < 400 && (gKeyScript % 8) == 0)
 				usb_hid_mouse_event(6, 4, false, false, false);
-			if (gKeyScript >= 3200) gKeyScript = -2;			/* done */
+			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
 		if (gDebugInjectMouseMotion) {

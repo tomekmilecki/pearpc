@@ -81,17 +81,11 @@ static const uint8 gMouseReport[] = {
 	0x05, 0x01,		/*     Usage Page (Generic Desktop)	*/
 	0x09, 0x30,		/*     Usage (X)			*/
 	0x09, 0x31,		/*     Usage (Y)			*/
+	0x09, 0x38,		/*     Usage (Wheel)			*/
 	0x15, 0x81,		/*     Logical Minimum (-127)		*/
 	0x25, 0x7f,		/*     Logical Maximum (127)		*/
-	/*
-	 * No Physical/Unit items: declaring physical == logical with an inch unit
-	 * works out to one count per inch, which is nonsense for a mouse (real
-	 * ones are ~400) and is worse than leaving resolution undefined.  Real
-	 * Apple mice omit these too, and the guest parses this descriptor for
-	 * real now -- it selects report protocol (SET_PROTOCOL wValue=1).
-	 */
 	0x75, 0x08,		/*     Report Size (8)			*/
-	0x95, 0x02,		/*     Report Count (2)			*/
+	0x95, 0x03,		/*     Report Count (3)			*/
 	0x81, 0x06,		/*     Input (Data, Variable, Relative)	*/
 	0xc0,			/*   End Collection			*/
 	0xc0			/* End Collection			*/
@@ -174,7 +168,7 @@ static const uint8 gMouseCfgDesc[] = {
 	 */
 	9, 4, 0, 0, 1, 3 /* HID */, 1 /* boot */, 2 /* mouse */, 0,
 	9, DESC_HID, 0x10, 0x01, 0, 1, DESC_REPORT, sizeof gMouseReport, 0,
-	7, 5, 0x81 /* EP1 IN */, 3 /* interrupt */, 3, 0, 10
+	7, 5, 0x81 /* EP1 IN */, 3 /* interrupt */, 4, 0, 10
 };
 
 static const uint8 gKeyboardCfgDesc[] = {
@@ -390,10 +384,11 @@ int usbhid_interrupt_in(USBHIDDevice &d, uint8 *buf, int maxlen)
 
 	int dx = d.dx < -127 ? -127 : (d.dx > 127 ? 127 : d.dx);
 	int dy = d.dy < -127 ? -127 : (d.dy > 127 ? 127 : d.dy);
-	int n = maxlen < 3 ? maxlen : 3;
+	int n = maxlen < 4 ? maxlen : 4;
 	if (n > 0) buf[0] = d.buttons;
 	if (n > 1) buf[1] = (uint8)dx;
 	if (n > 2) buf[2] = (uint8)dy;
+	if (n > 3) buf[3] = 0;			/* wheel */
 	d.dx -= dx;
 	d.dy -= dy;
 	/* Only stop reporting once the accumulated movement has all been sent and
