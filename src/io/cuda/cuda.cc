@@ -2292,7 +2292,7 @@ static void *cudaEventLoop(void *arg)
 			}
 			if (pressedAt) {
 				uint64 per = sys_get_hiresclk_ticks_per_second();
-				if (sys_get_hiresclk_ticks() - pressedAt > per / 4) {   /* 250ms */
+				if (sys_get_hiresclk_ticks() - pressedAt > per * 2) {   /* 2s: give both edges plenty of trap sites */
 					pressedAt = 0;
 					usb_hid_mouse_event(0, 0, false, false, false);
 					cuda_shim_mouse(0, 0, false);

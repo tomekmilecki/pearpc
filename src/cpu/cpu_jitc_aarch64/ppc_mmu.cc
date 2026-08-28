@@ -2298,86 +2298,83 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
 /* Set by the input path when a click needs posting: 1 = mouseDown, 2 = mouseUp. */
 volatile int gPendingMouseEvent = 0;
 
+/* PostEvent, captured the first time a call to it is observed. */
+static uint32 gPEEntry = 0, gPEToc = 0;
+
+/* Saved guest state across an injected call. */
+static struct {
+    int      active;
+    uint32   gpr[13];		/* r0..r12: volatile, plus r2 */
+    uint32   lr, ctr, cr, npc;
+} gCall;
+
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
-     * PostEvent's CFM import stub in the USB keyboard module is
-     * lwz r12,-224(r2), identified by its own arguments (r3 = event number).
+     * Host->guest call of PostEvent, so a click can be posted without the
+     * CursorDeviceManager or VBL.  PostEvent fills the event's "where" from
+     * the low-memory Mouse global, which the cursor shim keeps correct, so the
+     * click lands under the visible pointer.
      *
-     * The guest calls PostEvent on its own periodically, so rather than build
-     * machinery to CALL guest code -- which would mean trapping a hot
-     * instruction, ending the JIT block every time, and re-entrant execution
-     * with all its failure modes -- borrow a call it is already making and
-     * substitute the arguments.  The event it would have posted is dropped;
-     * the ones seen here when idle are app1Evt (r3 = 12), which nothing needs.
+     * This trap sits on the CFM import stub `lwz r12,-224(r2)`.  That encoding
+     * is not unique -- other modules' glue shares it -- so PostEvent is
+     * recognised by its resolved target: TVector -> ROM entry 0xffd095ec.
      *
-     * PostEvent fills the event's "where" from the low-memory Mouse global,
-     * which the cursor shim keeps correct, so the click lands under the
-     * visible pointer without the CursorDeviceManager or VBL.
+     * The call is made by redirecting execution rather than re-entering the
+     * CPU: save the volatile state, point lr back at THIS instruction so
+     * PostEvent returns into this handler, and set npc to the entry.  On
+     * re-entry the state is restored and the guest's own instruction proceeds
+     * as if nothing happened.  Dispatched as a branch, so npc takes effect.
      */
     uint32 ea = aCPU.gpr[2] - 224;
     uint32 tvec = 0;
     int r = ppc_read_effective_word(aCPU, ea, tvec);
-    if (!r) aCPU.gpr[12] = tvec;
+    if (r) return r;
 
-    /*
-     * lwz r12,-224(r2) is not unique to the keyboard module's PostEvent stub --
-     * other modules' glue shares the encoding and fires far more often, which
-     * both floods the log and risks hijacking an unrelated call.  Discriminate
-     * on the resolved target: PostEvent's TVector points at ROM entry
-     * 0xffd095ec, which is stable across boots (unlike the TVector address
-     * itself, which moves as modules relocate).
-     */
-    uint32 entryPt = 0;
-    ppc_read_effective_word(aCPU, tvec, entryPt);
-    {   /* Diagnostic: what targets actually resolve here while a click is
-         * armed?  If PostEvent's entry differs from the 0xffd095ec seen
-         * earlier, the discriminator is wrong rather than the call missing. */
-        static int d = 0;
-        if (gPendingMouseEvent && d < 12) { d++;
-            fprintf(stderr, "[PEVANY] entry=%08x r3=%u tvec=%08x\n",
-                    entryPt, aCPU.gpr[3], tvec); }
-    }
-    if (entryPt != 0xffd095ecU) return r;
-
-    {   /* Does the real stub fire, and with what? */
-        /* Only log once a click is actually armed: an unconditional cap fills
-         * up during boot with the guest's own app-events and hides the hits
-         * that matter. */
+    if (gCall.active) {				/* PostEvent has returned */
+        gCall.active = 0;
+        for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
+        /*
+         * Suppress the call we borrowed.  A synthetic keystroke is what forced
+         * the guest to reach this stub, and letting its own PostEvent proceed
+         * would type a character on every click.  Posting nullEvent(0) instead
+         * keeps the guest's control flow intact while discarding the event.
+         */
+        aCPU.gpr[3] = 0;
+        aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
+        aCPU.npc = gCall.npc;			/* resume the guest's own flow */
         static int n = 0;
-        if (gPendingMouseEvent && n < 10) { n++;
-            fprintf(stderr, "[PEVHIT] r3=%u r4=%08x pending=%d\n",
-                    aCPU.gpr[3], aCPU.gpr[4], gPendingMouseEvent); }
+        if (n < 40) { n++; fprintf(stderr, "[CALL] PostEvent returned, state restored\n"); }
+        return 0;
     }
+
+    aCPU.gpr[12] = tvec;			/* the instruction's own effect */
+
+    uint32 entry = 0;
+    ppc_read_effective_word(aCPU, tvec, entry);
+    if (entry == 0xffd095ecU && !gPEEntry) {
+        gPEEntry = entry;
+        ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
+        fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
+    }
+
     int want = gPendingMouseEvent;
-    /*
-     * Only hijack a call that really is PostEvent: r3 must be a valid event
-     * number (1..15).  This encoding also occurs outside the keyboard
-     * module's stub, and a looser test substituted arguments into an
-     * unrelated call (it displaced "event" 1858576).  Never displace a real
-     * keystroke either.
-     */
-    /*
-     * When idle the guest never calls PostEvent, so there is nothing to
-     * borrow -- the input path therefore injects a synthetic keystroke to
-     * force one, and we displace THAT.  Substituting mouseDown for its
-     * keyDown means the character is never typed and a click is posted in its
-     * place.  So keystrokes are now fair game; the only cost is that a real
-     * key pressed in the same instant is swallowed.
-     */
-    if (want && aCPU.gpr[3] >= 1 && aCPU.gpr[3] <= 15) {
+    if (want && gPEEntry) {
         gPendingMouseEvent = 0;
-        uint32 wasR3 = aCPU.gpr[3];
+        for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
+        gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
+        gCall.npc = aCPU.npc;			/* = pc + 4 */
+        gCall.active = 1;
         aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
-        aCPU.gpr[4] = 0;			/* message unused for mouse */
+        aCPU.gpr[4] = 0;
+        aCPU.gpr[2] = gPEToc;
+        aCPU.lr  = aCPU.pc;			/* return into this handler */
+        aCPU.npc = gPEEntry;
         static int n = 0;
-        if (n < 10) {
-            n++;
-            fprintf(stderr, "[HIJACK] posted mouse event %d (displaced evt %u)\n",
-                    want, wasR3);
-        }
+        if (n < 40) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at pc=%08x mouse=?\n",
+                                  want, aCPU.pc); }
     }
-    return r;
+    return 0;
 }
 
 extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &aCPU)

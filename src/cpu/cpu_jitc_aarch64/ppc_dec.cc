@@ -1295,8 +1295,12 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         return flowContinue;
     }
     if (aJITC.current_opc == 0x8182ff20) {	/* PostEvent import stub */
-        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_postevent_trace);
-        return flowContinue;
+        /* Branch form: the handler may redirect npc to inject a call into the
+         * guest, so dispatch through ppc_new_pc_asm like a real branch. */
+        ppc_opc_gen_interpret(aJITC, ppc_opc_postevent_trace);
+        aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
+        aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);
+        return flowEndBlockUnreachable;
     }
     if (aJITC.current_opc == 0x387d0002) {
         ppc_opc_gen_interpret(aJITC, ppc_opc_vinit_trace);
