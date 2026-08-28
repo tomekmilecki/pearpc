@@ -1739,7 +1739,23 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	 * criterion (does the UI react, does EventQueue fill) and changes nothing:
 	 * the queue stays empty either way, so the missing event post is not the
 	 * ADB Manager being absent. */
-	const bool adbInput = !usb_hid_present();
+	/*
+	 * Keep the ADB input nodes even when USB HID is present.  Withdrawing them
+	 * was justified by "restoring them changes nothing: the UI does not react
+	 * and EventQueue stays empty" -- but that was measured with an injector
+	 * that sent ADB 0x00 ('A') and fired key press/release back to back, so
+	 * the UI could not have reacted whatever the tree looked like.  That
+	 * elimination is void.  It matters because the Cursor Device Manager comes
+	 * from the ADB world: with no cursor device registered, the CursorDeviceMove
+	 * calls USBHIDDriver makes have nowhere to land, which is exactly the
+	 * observed symptom -- the guest collects our reports and ignores them.
+	 *
+	 * Retested properly on 2026-08-28 with PEARPC_ADB_INPUT=1: restoring the
+	 * nodes changes nothing, the pointer stays at (15,15).  So the elimination
+	 * happens to have been right, and the default stays withdrawn -- a Cube
+	 * really has no ADB.  The override is kept so the test is one env var away.
+	 */
+	const bool adbInput = getenv("PEARPC_ADB_INPUT") ? true : !usb_hid_present();
 	PromNode *adb = new PromNode("adb");
 	via->addNode(adb);
 	adb->addProp(new PromPropString("device_type", "adb"));

@@ -407,7 +407,20 @@ bool processTD(int port, uint32 td, int pid, int endpoint)
 	if (pid == OHCI_TD_DP_IN) {
 		gUSBIntIn++;
 		int n = usbhid_interrupt_in(d, tmp, len < (int)sizeof tmp ? len : (int)sizeof tmp);
-		if (n < 0) return false;		/* NAK -- retry next frame */
+		if (n < 0) {
+			if (port == USBHID_PORT_MOUSE) {
+				/* Sample the TD the endpoint is sitting on while idle: if the
+				 * driver is cycling TDs normally this address keeps changing. */
+				static uint32 lastIdleTd = 0;
+				static int shown = 0;
+				if (td != lastIdleTd && shown < 12) {
+					shown++;
+					fprintf(stderr, "[MTD] idle poll now on td=%08x\n", td);
+					lastIdleTd = td;
+				}
+			}
+			return false;		/* NAK -- retry next frame */
+		}
 		{	/* A report actually handed to the guest. */
 			gUSBReports++;
 			/* Record exactly where this report landed, so the trace can log
@@ -435,6 +448,25 @@ bool processTD(int port, uint32 td, int pid, int endpoint)
 				fprintf(stderr, "[USB-RPT] port%d %d bytes: %02x %02x %02x (buf %d)\n",
 					port, n, tmp[0], n > 1 ? tmp[1] : 0, n > 2 ? tmp[2] : 0, len);
 			}
+		}
+		if (port == USBHID_PORT_MOUSE) {
+			/* Does the guest ever CONSUME a mouse completion?  polls only mean
+			 * the OHCI keeps finding a TD on the endpoint -- if the driver
+			 * never processes the done queue for this ED it would re-present
+			 * the SAME TD forever, which looks like a busy pipe while no data
+			 * is ever read.  A driver that handled the completion queues a
+			 * fresh TD, so the address must change. */
+			static uint32 lastTd = 0;
+			static int watch = 0;
+			static int shown = 0;
+			if (shown < 24) {
+				shown++;
+				fprintf(stderr, "[MTD] delivered report on td=%08x (prev=%08x) %s\n",
+					td, lastTd, td == lastTd ? "<== SAME TD REUSED" : "(new TD)");
+				watch = 4;
+			}
+			lastTd = td;
+			(void)watch;
 		}
 		bufWrite(cbp, be, tmp, n);
 		retireTD(td, t0, OHCI_CC_NOERROR, n == len ? 0 : cbp + n);
