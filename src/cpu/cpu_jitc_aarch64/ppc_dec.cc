@@ -1251,6 +1251,17 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         (void)ppc_opc_hidtrace_load;
     }
 
+    /*
+     * The guest freezes in a poll loop at 0x00f26548-0x00f2656c, spinning on
+     * bit 0 of a device byte that never sets.  `lbz r30,2(r28)` there encodes
+     * as 0x8bdc0002 -- a single fixed encoding, so tracing it costs nothing
+     * measurable while identifying which device is being polled.
+     */
+    if (aJITC.current_opc == 0x8bdc0002) {
+        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_hidtrace_load);
+        return flowContinue;
+    }
+
     uint32 mainopc = PPC_OPC_MAIN(aJITC.current_opc);
     const char *interpretMain = getenv("PPC_INTERPRET_MAIN");
     if (getenv("PPC_INTERPRET_ALL") ||

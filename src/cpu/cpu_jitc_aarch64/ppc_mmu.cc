@@ -2287,6 +2287,16 @@ extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &aCPU)
     else                { uint32 w; r = ppc_read_effective_word(aCPU, ea, w); v = w; width = 4; }
     if (r == PPC_MMU_OK) {
         aCPU.gpr[rD] = v;
+        if (aCPU.current_opc == 0x8bdc0002) {
+            static int ft = 0;
+            if (ft < 8) {
+                ft++;
+                uint32 pa2 = 0;
+                ppc_effective_to_physical(aCPU, ea, PPC_MMU_READ, pa2);
+                fprintf(stderr, "[FREEZE] poll ea=%08x pa=%08x val=%02x r28=%08x pc=%08x\n",
+                        ea, pa2, (unsigned)(v & 0xff), aCPU.gpr[28], aCPU.pc);
+            }
+        }
         /*
          * Compare in the PHYSICAL address space.  The TD's buffer pointer is
          * physical (OHCI DMA), while `ea` here is the guest's effective
