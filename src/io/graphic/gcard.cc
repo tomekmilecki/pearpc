@@ -306,6 +306,18 @@ void gcard_osi(int cpu)
 			break;
 		case 1:
 			gVBLon = true;
+			/*
+			 * The guest asks for VBL here but never unmasks IRQ 23 itself.
+			 * Unmasking it for them (PEARPC_FORCE_VBL_IRQ=1) is safe -- the
+			 * boot survives, unlike forcing from power-on -- but it does not
+			 * help: CrsrNew still is not cleared, because Mac OS never
+			 * installed a VBL handler in the first place, which is also why it
+			 * never unmasked the line.  Left opt-in so the experiment is one
+			 * env var away; on by default it would only arm an interrupt that
+			 * nothing services.
+			 */
+			if (getenv("PEARPC_FORCE_VBL_IRQ"))
+				pic_force_enable(IO_PIC_IRQ_GCARD);
 			break;
 		default:
 			IO_GRAPHIC_ERR("39\n");

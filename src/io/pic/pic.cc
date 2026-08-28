@@ -61,6 +61,22 @@ static bool openpic_pending(int intr)
 	return (PIC_pending_high & (1U << (intr - 32))) != 0;
 }
 
+/*
+ * The guest enables VBL on the video card (OSI 39) but never unmasks the
+ * card's line in the PIC, so every VBL raise is discarded and Mac OS's VBL
+ * cursor task -- which is what copies RawMouse into Mouse, clears CrsrNew and
+ * redraws the pointer -- never runs.  That leaves the pointer dead on every
+ * transport while the keyboard, posted at interrupt time, still works.
+ * Unmask on the guest's behalf, but only once it has asked for VBL.
+ */
+void pic_force_enable(int intr)
+{
+	if (intr < 32) PIC_enable_low |= 1U << intr;
+	else PIC_enable_high |= 1U << (intr - 32);
+	fprintf(stderr, "[PIC] force-enabled IRQ%d (enable_low=%08x)\n",
+		intr, PIC_enable_low);
+}
+
 static bool openpic_enabled(int intr)
 {
 	return intr >= 0 && intr < 64 && !(OpenPIC_ivpr[intr] & 0x80000000) &&
