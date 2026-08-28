@@ -130,11 +130,13 @@ static const uint8 gKeyboardReport[] = {
 static const uint8 gMouseDevDesc[] = {
 	18, DESC_DEVICE, 0x00, 0x01, 0, 0, 0, 8,
 	/*
-	 * Identify as an Apple USB Mouse (05ac:0301) rather than the OPTi id the
-	 * emulated OHCI used to carry.  Apple's USBHIDMouseModule has
+	 * Deliberately NOT an Apple id.  Apple's USBHIDMouseModule has
 	 * vendor-specific paths -- its own strings say "Do a SetIdle on non-Apple
-	 * mice, as some 3rd party mice don't send reports on button up" -- so the
-	 * Apple path is the one its own hardware exercises.
+	 * mice, as some 3rd party mice don't send reports on button up" -- and the
+	 * measurements do NOT support that being the problem, though: swapping to
+	 * the keyboard's non-Apple OPTi id left setIdle=0 and proto=1 unchanged
+	 * and the pointer still dead, so the id selects nothing here.  Keep the
+	 * Apple id, which matches the hardware being emulated.
 	 */
 	0xac, 0x05,		/* idVendor  = 0x05ac Apple			*/
 	0x01, 0x03,		/* idProduct = 0x0301 Apple USB Mouse		*/

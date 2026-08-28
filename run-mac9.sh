@@ -85,6 +85,22 @@ if hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$WORK" >/dev
                          "Serial Tool" "XMODEM Tool"; do
                     [ -e "$EXT/$f" ] && mv "$EXT/$f" "$OFF/" && echo "    moved: $f"
                 done
+                # PEARPC_DISABLE_MOUSE_EXT=1 also moves the third-party mouse
+                # drivers aside.  Kensington MouseWorks is installed on this
+                # image and is a suspect for claiming the USB mouse and then
+                # not driving it: the guest enumerates and polls our mouse but
+                # ignores every report, while the keyboard works.
+                if [ "$PEARPC_DISABLE_MOUSE_EXT" = "1" ]; then
+                    echo "==> disabling third-party mouse extensions"
+                    CPL="$MNT/System Folder/Control Panels"
+                    for f in "Kensington USB Devices" "Kensington USB Shim" \
+                             "Kensington Startup ADB" "InputSprocket Extension"; do
+                        [ -e "$EXT/$f" ] && mv "$EXT/$f" "$OFF/" && echo "    moved: $f"
+                    done
+                    [ -e "$CPL/Kensington MouseWorks" ] && \
+                        mv "$CPL/Kensington MouseWorks" "$OFF/" && \
+                        echo "    moved: Kensington MouseWorks"
+                fi
                 sync
                 diskutil unmount "$MNT" >/dev/null 2>&1 || true
             else

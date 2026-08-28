@@ -551,6 +551,13 @@ static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 /* Timed key-injection script; -1 idle, otherwise elapsed ms. */
 static int gKeyScript = -1;
 
+/* PEARPC_BOOT_SHIFT=1 holds the Shift key across the extension-loading phase
+ * of startup, which is how Mac OS is told to boot with all extensions off.
+ * USB support lives in ROM/System on a New World Mac, so the mouse still
+ * enumerates -- if the pointer works only in this mode, a third-party
+ * extension (Kensington MouseWorks and friends are installed) is stealing it. */
+static int gBootShiftState = 0;
+
 static void cuda_renew_interrupt()
 {
 	if (gCUDA.rIFR & gCUDA.rIER & (SR_INT | T1_INT | T2_INT)) {
