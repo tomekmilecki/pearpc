@@ -555,6 +555,7 @@ static volatile int gClickRing[CLICK_RING];
 static volatile int gClickHead = 0, gClickTail = 0;
 static int gSyntheticKeyDown = 0;
 static uint64 gSyntheticKeyAt = 0;
+static uint8 gSyntheticKey = 0;
 uint32 gLastPostedEl = 0;
 
 static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown);
@@ -1968,7 +1969,8 @@ static void cuda_shim_apply()
 		 * keyboard reliably does.  The synthetic key's own keyDown is what
 		 * gets displaced, so nothing is ever typed.
 		 */
-		usb_hid_key_event(0x00, true);
+		gSyntheticKey = 0x00;
+		usb_hid_key_event(gSyntheticKey, true);
 		gSyntheticKeyDown = 1;
 		gSyntheticKeyAt = sys_get_hiresclk_ticks();
 		{
@@ -1990,8 +1992,12 @@ static void cuda_shim_apply()
 	    sys_get_hiresclk_ticks() - gSyntheticKeyAt >
 	        sys_get_hiresclk_ticks_per_second() / 12) {
 		gSyntheticKeyDown = 0;
-		usb_hid_key_event(0x00, false);
+		usb_hid_key_event(gSyntheticKey, false);
 	}
+	/* (provocation moved to cudaEventLoop: keystrokes injected from the CPU
+	 * thread here never reached the keyboard module, while the same calls
+	 * from the event-loop thread demonstrably do) */
+
 	static const int clickEventsOff = 1;
 	if (!clickEventsOff && gClickHead != gClickTail) {
 		uint8 mo[4];
@@ -2217,6 +2223,31 @@ static void *cudaEventLoop(void *arg)
 		cuda_update_T2();
 		cuda_update_sr_interrupt();
 		sys_unlock_mutex(gCUDAMutex);
+		{
+			/* Provoke the keyboard module into calling PostEvent while a
+			 * click is waiting, so the trap has a site to inject at. */
+			extern volatile int gPendingMouseEvent;
+			static uint64 provAt = 0;
+			static int provDown = 0;
+			static uint8 provKey = 0;
+			uint64 per = sys_get_hiresclk_ticks_per_second();
+			if (gPendingMouseEvent) {
+				if (!provDown && sys_get_hiresclk_ticks() - provAt > per / 20) {
+					static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
+					static unsigned pi = 0;
+					provKey = keys[pi++ % (sizeof keys)];
+					provDown = 1;
+					provAt = sys_get_hiresclk_ticks();
+					usb_hid_key_event(provKey, true);
+				} else if (provDown && sys_get_hiresclk_ticks() - provAt > per / 40) {
+					provDown = 0;
+					usb_hid_key_event(provKey, false);
+				}
+			} else if (provDown) {
+				provDown = 0;
+				usb_hid_key_event(provKey, false);
+			}
+		}
 		if (gKeyScript >= 0) {
 			/* Realistic pointer motion: ~50 small reports at the 8ms poll
 			 * cadence, totalling (200,150).  A real trackpad moves the

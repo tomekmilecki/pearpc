@@ -1228,6 +1228,7 @@ extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &);
 extern "C" int ppc_opc_iif_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &);
+extern "C" int ppc_opc_blr_inject(PPC_CPU_State &);
 
 /*
  * video.x calls VSLNewInterruptService(&entry, 'vbl ', &serviceID) at module
@@ -1293,6 +1294,13 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
     if (aJITC.current_opc == 0x3c807662) {
         ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
         return flowContinue;
+    }
+    if (aJITC.current_opc == 0x4e800020 && getenv("PEARPC_CLICK_HIJACK")) {
+        /* blr: hot injection site for the PostEvent call (see ppc_mmu.cc). */
+        ppc_opc_gen_interpret(aJITC, ppc_opc_blr_inject);
+        aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
+        aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);
+        return flowEndBlockUnreachable;
     }
     if (aJITC.current_opc == 0x8182ff20) {	/* PostEvent import stub */
         /* Branch form: the handler may redirect npc to inject a call into the

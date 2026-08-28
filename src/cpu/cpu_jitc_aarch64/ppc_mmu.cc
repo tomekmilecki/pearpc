@@ -2308,6 +2308,50 @@ static struct {
     uint32   lr, ctr, cr, npc;
 } gCall;
 
+/*
+ * Injection site for the PostEvent call: plain `blr` (0x4e800020).
+ *
+ * The import stub is far too rare -- a click arms, and that stub then simply
+ * never executes again, so the call has nowhere to land and no amount of
+ * provoking the keyboard changes it.  blr runs constantly, so a pending click
+ * is delivered essentially immediately.  Emulating it is exact: npc = lr.
+ */
+extern "C" int ppc_opc_blr_inject(PPC_CPU_State &aCPU)
+{
+    uint32 target = aCPU.lr & ~3u;
+
+    if (gCall.active) {				/* PostEvent has returned here */
+        gCall.active = 0;
+        for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
+        aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
+        aCPU.npc = gCall.npc;			/* the blr's original target */
+        static int n = 0;
+        if (n < 20) { n++; fprintf(stderr, "[CALL] returned; resuming at %08x\n", gCall.npc); }
+        return 0;
+    }
+
+    int want = gPendingMouseEvent;
+    if (want && gPEEntry) {
+        gPendingMouseEvent = 0;
+        for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
+        gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
+        gCall.npc = target;			/* where the blr would have gone */
+        gCall.active = 1;
+        aCPU.gpr[3] = (uint32)want;
+        aCPU.gpr[4] = 0;
+        aCPU.gpr[2] = gPEToc;
+        aCPU.lr  = aCPU.pc;			/* return into this handler */
+        aCPU.npc = gPEEntry;
+        static int n = 0;
+        if (n < 20) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at blr %08x\n",
+                                   want, aCPU.pc); }
+        return 0;
+    }
+
+    aCPU.npc = target;				/* ordinary blr */
+    return 0;
+}
+
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
