@@ -2269,6 +2269,33 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  * happens at all.  The lwz r8,0x30(r31) at 0x24e8 immediately before it is a
  * unique encoding, so trapping it reports the call and its arguments.
  */
+/*
+ * video.x reads its "may install interrupts" flag with lbz r0,28(r31) at 0x1238
+ * and 0x1330, immediately before the guarded InstallInterruptFunctions calls.
+ * NOPing those guards did not make the call happen, so the question is whether
+ * this code is reached at all -- there is an earlier guard at 0x1234 testing
+ * the result of the call before it.  If this never fires, the block is skipped
+ * further up and patching the flag check is pointless.
+ */
+/*
+ * addi r3,r29,2 at video.x code offset 0x11c0 -- unique in the image, and
+ * inside the Initialize command handler (fn 0x1180), which is the path that
+ * contains InstallInterruptFunctions.  Does Mac OS ever send Initialize?
+ * (The earlier trap on lbz r0,28(r31) was worthless: that encoding is common
+ * across the whole guest, so its hits came from unrelated code.)
+ */
+extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &aCPU)
+{
+    aCPU.gpr[3] = aCPU.gpr[29] + 2;
+    static int n = 0;
+    if (n < 6) {
+        n++;
+        fprintf(stderr, "[VINIT] video.x Initialize handler running (r29=%08x)\n",
+                aCPU.gpr[29]);
+    }
+    return 0;
+}
+
 extern "C" int ppc_opc_iif_trace(PPC_CPU_State &aCPU)
 {
     uint32 ea = aCPU.gpr[31] + 0x30;

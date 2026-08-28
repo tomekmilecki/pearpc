@@ -2050,6 +2050,21 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	aty->addProp(new PromPropMemory("assigned-addresses", &assigned_addresses, sizeof assigned_addresses));
 */	
 	aty->addProp(new PromPropInt("address", IO_GCARD_FRAMEBUFFER_PA_START));
+	/*
+	 * video.x looks up exactly two properties -- its whole string table names
+	 * only "assigned-addresses" and "AAPL,address" -- and we published
+	 * neither, so its Initialize setup call returns 0 and the driver then
+	 * correctly skips InstallInterruptFunctions.  That is the head of the
+	 * chain that leaves the pointer dead: no interrupt claimed -> no VBL ->
+	 * the VBL cursor task never runs.  Publish AAPL,address (one entry, the
+	 * framebuffer base) so the lookup succeeds.
+	 */
+	{
+		uint32 fb = IO_GCARD_FRAMEBUFFER_PA_START;
+		byte aaplAddr[4] = { (byte)(fb >> 24), (byte)(fb >> 16),
+		                     (byte)(fb >> 8),  (byte)fb };
+		aty->addProp(new PromPropMemory("AAPL,address", &aaplAddr, sizeof aaplAddr));
+	}
 	byte atyreg[] = {
 	0x00,0x00,0x38,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
 	0x00,0x00,0x00,0x00, 
