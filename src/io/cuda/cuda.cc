@@ -1781,12 +1781,20 @@ static void *cudaEventLoop(void *arg)
 			 * Finder desktop.
 			 */
 			{
-				/* Down-arrow to highlight a user (the Log in button is dimmed
-				 * until one is selected), then Return to activate it. */
-				static int step = 0;
-				uint8 key = (step++ == 0) ? 0x7d : 0x24;   /* Down, then Return */
-				usb_hid_key_event(key, true);
-				usb_hid_key_event(key, false);
+				/* Drive BOTH paths: USB HID and the ADB/CUDA packet interface.
+				 * KeyTime (0x186) latches when a key event is actually posted,
+				 * so this says whether either path reaches the Event Manager.
+				 * ADB is only wired up when pci_usb_hid = 0 (the device tree
+				 * withdraws its nodes otherwise). */
+				usb_hid_key_event(0x00, true);
+				usb_hid_key_event(0x00, false);
+				SystemEvent kev = {};
+				kev.type = sysevKey;
+				kev.key.keycode = 0x00;		/* ADB 'A' */
+				kev.key.pressed = true;
+				tryProcessCudaEvent(kev);
+				kev.key.pressed = false;
+				tryProcessCudaEvent(kev);
 			}
 			/* (ADB key injection removed: with the ADB nodes withdrawn it cannot
 			 * reach the guest, and it made KeyMap changes ambiguous between the
