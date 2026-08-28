@@ -1760,33 +1760,22 @@ static void *cudaEventLoop(void *arg)
 			/* NOTE: do not call cudaEventHandler() from this thread -- it
 			 * takes gCUDAEventSem, which cudaEventLoop already holds, and the
 			 * recursive lock deadlocks the loop.  Real input is fine: it
-			 * arrives on the SDL thread.  Drive the USB device directly. */
-			if (gKeyScript < 400 && (gKeyScript % 8) == 0)
-				usb_hid_mouse_event(4, 3, false, false, false);
-			/*
-			 * Then hold the button ~160ms and sample MBState *during* the
-			 * hold.  Every probe so far read MBState after the release, so
-			 * "80" (up) was the only value it could ever have shown -- the
-			 * claim that buttons work rests on the same back-to-back
-			 * press/release defect that hid every keystroke.  Sampling
-			 * mid-hold says whether the mouse device works at all, or
-			 * whether only motion is being discarded.
+			 * arrives on the SDL thread.  Drive the USB device directly.
+			 *
+			 * Sequence: Return picks the user, Return submits the (empty)
+			 * password, then stream pointer motion.  Every mouse test so far
+			 * ran on the Multiple Users login screen, which may not run a
+			 * normal cursor environment; this gets to the desktop first.
 			 */
-			if (gKeyScript == 600)
-				usb_hid_mouse_event(0, 0, true, false, false);
-			if (gKeyScript == 500 || gKeyScript == 700) {
-				uint8 mb = 0, rm[4] = {0,0,0,0}, mo[4] = {0,0,0,0};
-				ppc_dma_read(&mb, LOMEM_BASE + 0x172, 1);
-				ppc_dma_read(rm, LOMEM_BASE + 0x82c, 4);
-				ppc_dma_read(mo, LOMEM_BASE + 0x830, 4);
-				fprintf(stderr, "[BTN] %s MBState=%02x RawMouse v=%d h=%d Mouse v=%d h=%d\n",
-					gKeyScript == 500 ? "after-motion  " : "button-HELD   ", mb,
-					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
-					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]));
+			switch (gKeyScript) {
+			case    0: usb_hid_key_event(0x24, true);  break;	/* Return  */
+			case  120: usb_hid_key_event(0x24, false); break;
+			case 1200: usb_hid_key_event(0x24, true);  break;	/* Return  */
+			case 1320: usb_hid_key_event(0x24, false); break;
 			}
-			if (gKeyScript == 760)
-				usb_hid_mouse_event(0, 0, false, false, false);
-			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
+			if (gKeyScript >= 2400 && gKeyScript < 2800 && (gKeyScript % 8) == 0)
+				usb_hid_mouse_event(6, 4, false, false, false);
+			if (gKeyScript >= 3200) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
 		if (gDebugInjectMouseMotion) {
