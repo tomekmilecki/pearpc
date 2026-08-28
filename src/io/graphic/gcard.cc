@@ -503,8 +503,49 @@ void gcard_init_config()
 {
 }
 
+/*
+ * Dump the guest framebuffer to /tmp/pearpc-fb.ppm.
+ *
+ * Verification must not depend on screencapture: if the host display is
+ * asleep or locked it returns an all-black image, which reads as "the guest
+ * drew nothing" when in fact nothing was sampled at all.  This reads the
+ * guest's own pixels, so it is true whatever the host screen is doing.
+ */
+void gcard_dump_framebuffer()
+{
+	int w = gDisplay ? gDisplay->mClientChar.width : 0;
+	int h = gDisplay ? gDisplay->mClientChar.height : 0;
+	int bpp = gDisplay ? gDisplay->mClientChar.bytesPerPixel : 0;
+	if (w <= 0 || h <= 0 || (bpp != 2 && bpp != 4) || !gFrameBuffer) {
+		fprintf(stderr, "[FBDUMP] not dumpable (w=%d h=%d bpp=%d)\n", w, h, bpp);
+		return;
+	}
+	FILE *f = fopen("/tmp/pearpc-fb.ppm", "wb");
+	if (!f) return;
+	fprintf(f, "P6\n%d %d\n255\n", w, h);
+	int stride = gDisplay->mClientChar.width * bpp;
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			const uint8 *px = gFrameBuffer + (size_t)y * stride + (size_t)x * bpp;
+			uint8 r, g, b;
+			if (bpp == 2) {
+				uint16 v = (uint16)((px[0] << 8) | px[1]);	/* big-endian 555 */
+				r = (uint8)(((v >> 10) & 0x1f) << 3);
+				g = (uint8)(((v >>  5) & 0x1f) << 3);
+				b = (uint8)(( v        & 0x1f) << 3);
+			} else {
+				r = px[1]; g = px[2]; b = px[3];		/* xRGB */
+			}
+			fputc(r, f); fputc(g, f); fputc(b, f);
+		}
+	}
+	fclose(f);
+	fprintf(stderr, "[FBDUMP] wrote /tmp/pearpc-fb.ppm (%dx%d bpp=%d)\n", w, h, bpp);
+}
+
 void gcard_debug_print()
 {
+	gcard_dump_framebuffer();
 	fprintf(stderr, "[VBL] raiseCalls=%u vblOn=%d osi39Calls=%u forced=%d\n",
 		gVBLRaises, (int)gVBLon, gVBLCtrlCalls, (int)gVBLForce);
 	{

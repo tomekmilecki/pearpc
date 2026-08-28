@@ -549,6 +549,11 @@ static void pmu_transfer_byte()
 static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 
 /* Timed key-injection script; -1 idle, otherwise elapsed ms. */
+/* Click edges: produced on the input thread, consumed on the CPU thread. */
+#define CLICK_RING 16
+static volatile int gClickRing[CLICK_RING];
+static volatile int gClickHead = 0, gClickTail = 0;
+
 static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown);
 static int gKeyScript = -1;
 
@@ -1692,29 +1697,54 @@ static int gCudaShimEnabled = 1;	/* CONCLUSIVELY dead: with Mouse(0x830) reading
 
 static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
 {
+	/*
+	 * MUST run on the CPU thread, from a device access, so the guest is inside
+	 * our code and cannot be in PostEvent/GetNextEvent at the same time.
+	 * Called from anywhere else this races the OS on its own queue and halts
+	 * the machine -- which is exactly what happened when it was called from
+	 * cuda_shim_mouse() on the SDL input thread.
+	 *
+	 * It also refuses to do any slot arithmetic.  The pool element stride was
+	 * never confirmed against a live record (the queue was empty every time it
+	 * was sampled), and guessing it wrong writes into the middle of another
+	 * record.  So: only post when the queue is EMPTY, and then use the first
+	 * element of the pool, which needs no stride at all.  If the queue is busy
+	 * the caller keeps the edge and tries again on the next access.
+	 */
 	uint8 b[4], c[2], q[10];
 	if (!ppc_dma_read(b, LOMEM_BASE + 0x146, 4)) return false;
 	uint32 buf = ((uint32)b[0]<<24)|((uint32)b[1]<<16)|((uint32)b[2]<<8)|b[3];
+	if (!buf) return false;
 	if (!ppc_dma_read(c, LOMEM_BASE + 0x154, 2)) return false;
 	int cnt = ((c[0]<<8)|c[1]) + 1;
-	if (!buf || cnt <= 0 || cnt > 256) return false;
+	if (cnt <= 0 || cnt > 256) return false;
 
 	uint8 m[2];
 	if (!ppc_dma_read(m, LOMEM_BASE + 0x144, 2)) return false;
 	uint16 mask = (uint16)((m[0]<<8)|m[1]);
-	if (!(mask & (1 << what))) return false;	/* masked off, as PostEvent checks */
+	if (!(mask & (1 << what))) return false;
 
 	if (!ppc_dma_read(q, LOMEM_BASE + 0x14a, 10)) return false;
 	uint32 head = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
 	uint32 tail = ((uint32)q[6]<<24)|((uint32)q[7]<<16)|((uint32)q[8]<<8)|q[9];
-
+	/*
+	 * Append properly rather than only posting into an empty queue.  A lone
+	 * mouseDown is not a click: the earlier build that worked -- IGA
+	 * highlighted -- queued the down and the up as a chain, and posting only
+	 * the down leaves the click unfinished, which is what stopped it working.
+	 *
+	 * That run is also what validates the 22-byte stride: it allocated a
+	 * second element at buf+22 and Mac OS consumed both, so the element size
+	 * is right.  Mark everything already linked so a live record is never
+	 * handed out, and bail if a link looks wrong.
+	 */
 	bool used[256];
 	memset(used, 0, sizeof used);
 	uint32 p = head;
 	for (int n = 0; p && n < cnt + 2; n++) {
 		long d = (long)p - (long)buf;
-		if (d >= 0 && d % EVQ_ELEM_SIZE == 0 && d / EVQ_ELEM_SIZE < cnt)
-			used[d / EVQ_ELEM_SIZE] = true;
+		if (d < 0 || d % 22 || d / 22 >= cnt) return false;	/* not our pool */
+		used[d / 22] = true;
 		uint8 l[4];
 		if (!ppc_dma_read(l, p, 4)) return false;
 		p = ((uint32)l[0]<<24)|((uint32)l[1]<<16)|((uint32)l[2]<<8)|l[3];
@@ -1722,12 +1752,12 @@ static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
 	int slot = -1;
 	for (int i = 0; i < cnt; i++) if (!used[i]) { slot = i; break; }
 	if (slot < 0) return false;
-	uint32 el = buf + (uint32)slot * EVQ_ELEM_SIZE;
+	uint32 el = buf + (uint32)slot * 22;
 
 	uint8 tk[4] = {0,0,0,0};
 	ppc_dma_read(tk, LOMEM_BASE + 0x16a, 4);			/* Ticks */
 
-	uint8 e[EVQ_ELEM_SIZE];
+	uint8 e[22];
 	memset(e, 0, sizeof e);
 	e[4] = 0; e[5] = 5;						/* qType = evType */
 	e[6] = (uint8)(what >> 8); e[7] = (uint8)what;			/* evtQWhat */
@@ -1744,13 +1774,12 @@ static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
 	} else {
 		if (!ppc_dma_write(LOMEM_BASE + 0x14a + 2, link, 4)) return false;	/* qHead */
 	}
-	if (!ppc_dma_write(LOMEM_BASE + 0x14a + 6, link, 4)) return false;		/* qTail */
+	if (!ppc_dma_write(LOMEM_BASE + 0x14a + 6, link, 4)) return false;	/* qTail */
 	{
 		static int n = 0;
 		if (n < 12) {
 			n++;
-			fprintf(stderr, "[POST] what=%d at (%d,%d) slot=%d el=%08x\n",
-				what, h, v, slot, el);
+			fprintf(stderr, "[POST] what=%d at (h=%d,v=%d) slot=%d el=%08x\n", what, h, v, slot, el);
 		}
 	}
 	return true;
@@ -1778,11 +1807,14 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 	int b = button ? 1 : 0;
 	if (gCudaShimEnabled && prevB != b) {
 		prevB = b;
-		uint8 mo[4];
-		if (ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4)) {
-			sint16 v = (sint16)((mo[0] << 8) | mo[1]);
-			sint16 h = (sint16)((mo[2] << 8) | mo[3]);
-			post_os_event(b ? 1 : 2, v, h, button);
+		/* Record the edge only.  Posting it here would run on the input
+		 * thread and race the guest on its own event queue; the CPU thread
+		 * drains this in cuda_shim_apply().  A queue rather than a flag,
+		 * because a press and release must both survive. */
+		int nxt = (gClickTail + 1) % CLICK_RING;
+		if (nxt != gClickHead) {
+			gClickRing[gClickTail] = b ? 1 : 2;
+			gClickTail = nxt;
 		}
 	}
 }
@@ -1791,13 +1823,36 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 static void cuda_shim_apply()
 {
 	if (!gCudaShimEnabled) return;
-	if (!gShimPending) return;
-	int dx = gShimDx, dy = gShimDy;
-	bool button = gShimButton != 0;
-	gShimDx -= dx;
-	gShimDy -= dy;
-	gShimPending = 0;
-	cuda_shim_write(dx, dy, button);
+
+	if (gShimPending) {
+		int dx = gShimDx, dy = gShimDy;
+		bool button = gShimButton != 0;
+		gShimDx -= dx;
+		gShimDy -= dy;
+		gShimPending = 0;
+		cuda_shim_write(dx, dy, button);
+	}
+
+	/*
+	 * Drain click edges here, on the CPU thread, with the guest stopped inside
+	 * this device access -- so it cannot be in PostEvent/GetNextEvent while we
+	 * touch its queue.  One per call: post_os_event() only writes when the
+	 * queue is empty, so a press stays pending until the OS has taken the
+	 * previous event, which serialises press and release naturally.
+	 */
+	static const int clickEventsOff = getenv("PEARPC_NO_CLICK_EVENTS") ? 1 : 0;
+	if (!clickEventsOff && gClickHead != gClickTail) {
+		uint8 mo[4];
+		if (ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4)) {
+			sint16 v = (sint16)((mo[0] << 8) | mo[1]);
+			sint16 h = (sint16)((mo[2] << 8) | mo[3]);
+			while (gClickHead != gClickTail) {
+				int what = gClickRing[gClickHead];
+				if (!post_os_event((uint16)what, v, h, what == 1)) break;
+				gClickHead = (gClickHead + 1) % CLICK_RING;
+			}
+		}
+	}
 }
 
 static void cuda_shim_write(int dx, int dy, bool button)
