@@ -945,6 +945,48 @@ static void cuda_start_T1()
 	gCUDA.rIFR &= ~T1_INT;
 	IO_CUDA_TRACE("T1 restarted, T1 = %08x\n", T1);
 }
+/*
+ * Did the ROM resolve the video card's interrupt?  A node whose interrupt
+ * resolved carries AAPL,interrupts in its Name Registry entry; without it the
+ * driver loader installs no handler and says nothing -- which is exactly the
+ * USB symptom that [[pearpc-of-irq-binding-rule]] describes, and would explain
+ * why nothing ever installs a VBL handler for the display.
+ */
+static void probe_video_node_interrupts()
+{
+	const uint32 memSize = ppc_get_memory_size();
+	const uint32 chunk = 4 * 1024 * 1024;
+	const char *needle = "PearPCVideo";
+	const size_t nlen = strlen(needle);
+	byte *buf = new byte[chunk + 64];
+	int hits = 0, withIrq = 0, totalAapl = 0;
+	for (uint32 base = 0; base + nlen < memSize && hits < 8; base += chunk - 64) {
+		uint32 want = (base + chunk <= memSize) ? chunk : (memSize - base);
+		if (!ppc_dma_read(buf, base, want)) continue;
+		for (uint32 i = 0; i + nlen < want; i++) {
+			if (memcmp(buf + i, needle, nlen) != 0) continue;
+			hits++;
+			/* look for AAPL,interrupts within the surrounding registry entry */
+			uint32 lo = i > 8192 ? i - 8192 : 0;
+			uint32 hi = (i + 8192 < want) ? i + 8192 : want;
+			bool found = false;
+			for (uint32 j = lo; j + 15 < hi; j++) {
+				if (memcmp(buf + j, "AAPL,interrupts", 15) == 0) { found = true; break; }
+			}
+			if (found) withIrq++;
+			fprintf(stderr, "[NREG] PearPCVideo at %08x -- AAPL,interrupts %s\n",
+				base + i, found ? "PRESENT" : "<== MISSING");
+			if (hits >= 8) break;
+		}
+		/* count AAPL,interrupts overall, as a sanity check that the ROM makes them at all */
+		for (uint32 j = 0; j + 15 < want; j++)
+			if (memcmp(buf + j, "AAPL,interrupts", 15) == 0) totalAapl++;
+	}
+	fprintf(stderr, "[NREG] PearPCVideo entries=%d withAAPLinterrupts=%d totalAAPLinterrupts=%d\n",
+		hits, withIrq, totalAapl);
+	delete[] buf;
+}
+
 static bool cuda_complete_newworld_interrupt_probe()
 {
 	const uint32 memorySize = ppc_get_memory_size();
@@ -1954,6 +1996,7 @@ static void *cudaEventLoop(void *arg)
 					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
 					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]),
 					cn[0], cn[1], mbs[0]);
+				probe_video_node_interrupts();
 				usb_debug_print();
 				gcard_debug_print();
 				{
