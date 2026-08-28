@@ -1774,8 +1774,24 @@ static void *cudaEventLoop(void *arg)
 			 * ran on the Multiple Users login screen, which may not run a
 			 * normal cursor environment; this gets to the desktop first.
 			 */
-			if (gKeyScript < 400 && (gKeyScript % 8) == 0)
+			if (gKeyScript < 400 && (gKeyScript % 8) == 0) {
 				usb_hid_mouse_event(6, 4, false, false, false);
+				/*
+				 * Also drive the ADB/CUDA mouse path.  The previous "restore
+				 * the ADB nodes" test injected only over USB, so it never
+				 * exercised ADB at all and said nothing about it.  This is the
+				 * same call the key script uses; cudaEventLoop has already
+				 * released gCUDAMutex here, so it is safe from this thread
+				 * (unlike cudaEventHandler, which would deadlock on
+				 * gCUDAEventSem).
+				 */
+				SystemEvent mev = {};
+				mev.type = sysevMouse;
+				mev.mouse.type = sme_motionNotify;
+				mev.mouse.relx = 6;
+				mev.mouse.rely = 4;
+				tryProcessCudaEvent(mev);
+			}
 			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
