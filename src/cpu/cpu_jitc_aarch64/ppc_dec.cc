@@ -1225,6 +1225,37 @@ void FASTCALL ppc_exec_opc(PPC_CPU_State &aCPU)
 }
 
 extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &);
+extern "C" int ppc_opc_iif_trace(PPC_CPU_State &);
+
+/*
+ * video.x calls VSLNewInterruptService(&entry, 'vbl ', &serviceID) at module
+ * offset 0x1648 and, if it returns non-zero, branches away without ever
+ * claiming the display interrupt -- which is why that PIC source alone keeps
+ * vector 0 and stays masked, so no VBL is delivered and the cursor task never
+ * runs.  Trap the two distinctive encodings around that call to read the
+ * result: addis r4,r0,0x7662 (building 'vbl ') and extsh r3,r3 (the returned
+ * OSStatus).  Chosen at translation time so the instruction identity is exact.
+ */
+extern "C" int ppc_opc_vsl_trace(PPC_CPU_State &aCPU)
+{
+    uint32 opc = aCPU.current_opc;
+    if (opc == 0x3c807662) {
+        static int n = 0;
+        if (n < 8) { n++; fprintf(stderr, "[VSL] about to call VSLNewInterruptService('vbl ')\n"); }
+        aCPU.gpr[4] = 0x76620000;               /* addis r4,r0,0x7662 */
+    } else if (opc == 0x7c630734) {
+        uint32 v = aCPU.gpr[3];
+        static int n = 0;
+        if (n < 24) {
+            n++;
+            fprintf(stderr, "[VSL] result r3=%08x (%d)%s\n", v, (int)(sint32)v,
+                v ? "   <== ERROR: driver skips claiming the interrupt" : "   noErr");
+        }
+        aCPU.gpr[3] = (uint32)(sint32)(sint16)(v & 0xffff);  /* extsh r3,r3 */
+    }
+    return 0;
+}
+
 
 JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
 {
@@ -1257,6 +1288,14 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
      * as 0x8bdc0002 -- a single fixed encoding, so tracing it costs nothing
      * measurable while identifying which device is being polled.
      */
+    if (aJITC.current_opc == 0x3c807662) {
+        ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
+        return flowContinue;
+    }
+    if (aJITC.current_opc == 0x811f0030) {
+        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_iif_trace);
+        return flowContinue;
+    }
     if (aJITC.current_opc == 0x8bdc0002) {
         ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_hidtrace_load);
         return flowContinue;

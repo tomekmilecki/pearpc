@@ -2261,6 +2261,31 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  * byte-only version found nothing because a 3-byte report is most naturally
  * read with a word or halfword load.
  */
+/*
+ * video.x calls InstallInterruptFunctions at module offset 0x24ec -- that is
+ * what actually claims the hardware interrupt.  VSLNewInterruptService('vbl ')
+ * before it succeeds (video_ctrl:1 runs on its success path), yet the display
+ * PIC source is never claimed, so the question is whether this second call
+ * happens at all.  The lwz r8,0x30(r31) at 0x24e8 immediately before it is a
+ * unique encoding, so trapping it reports the call and its arguments.
+ */
+extern "C" int ppc_opc_iif_trace(PPC_CPU_State &aCPU)
+{
+    uint32 ea = aCPU.gpr[31] + 0x30;
+    uint32 v = 0;
+    int r = ppc_read_effective_word(aCPU, ea, v);
+    if (!r) aCPU.gpr[8] = v;
+    static int n = 0;
+    if (n < 6) {
+        n++;
+        fprintf(stderr, "[IIF] InstallInterruptFunctions about to be called: "
+                "r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x\n",
+                aCPU.gpr[3], aCPU.gpr[4], aCPU.gpr[5],
+                aCPU.gpr[6], aCPU.gpr[7], v);
+    }
+    return r;
+}
+
 extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &aCPU)
 {
     int rD, rA;
