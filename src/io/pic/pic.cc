@@ -69,12 +69,29 @@ static bool openpic_pending(int intr)
  * transport while the keyboard, posted at interrupt time, still works.
  * Unmask on the guest's behalf, but only once it has asked for VBL.
  */
+uint32 pic_get_ivpr(int intr)
+{
+	return (intr >= 0 && intr < 64) ? OpenPIC_ivpr[intr] : 0;
+}
+
 void pic_force_enable(int intr)
 {
+	if (intr < 0 || intr >= 64) return;
 	if (intr < 32) PIC_enable_low |= 1U << intr;
 	else PIC_enable_high |= 1U << (intr - 32);
-	fprintf(stderr, "[PIC] force-enabled IRQ%d (enable_low=%08x)\n",
-		intr, PIC_enable_low);
+	/*
+	 * Delivery is gated by the IVPR, not by PIC_enable_low: openpic_enabled()
+	 * tests !(ivpr & 0x80000000) and priority > ctpr.  Setting the bookkeeping
+	 * mask alone changed nothing, which is why the first attempt at this
+	 * appeared to prove that unmasking does not help.  Clear the IVPR mask and
+	 * raise the priority above ctpr so the source can actually be selected.
+	 */
+	uint32 before = OpenPIC_ivpr[intr];
+	OpenPIC_ivpr[intr] &= ~0x80000000U;
+	if (((OpenPIC_ivpr[intr] >> 16) & 0xf) <= OpenPIC_ctpr)
+		OpenPIC_ivpr[intr] = (OpenPIC_ivpr[intr] & ~0x000f0000U) | 0x000f0000U;
+	fprintf(stderr, "[PIC] force-enabled IRQ%d ivpr %08x -> %08x ctpr=%u (usb ivpr=%08x)\n",
+		intr, before, OpenPIC_ivpr[intr], OpenPIC_ctpr, OpenPIC_ivpr[IO_PIC_IRQ_USB]);
 }
 
 static bool openpic_enabled(int intr)
@@ -181,6 +198,16 @@ static void openpic_read(uint32 addr, uint32 &data, int size)
 					selected = intr;
 					priority = candidatePriority;
 				}
+			}
+			if (selected == IO_PIC_IRQ_GCARD) {
+				/* Did the guest ever register a vector for the video source?
+				 * ivpr==0 means no handler was installed, so delivering the
+				 * interrupt hands Mac OS vector 0 and it is discarded. */
+				static unsigned long n = 0;
+				if ((n++ % 200) == 0)
+					fprintf(stderr, "[PICACK] IRQ%d delivered #%lu vector=%02x ivpr=%08x\n",
+						IO_PIC_IRQ_GCARD, n, OpenPIC_ivpr[selected] & 0xff,
+						OpenPIC_ivpr[selected]);
 			}
 			if (selected < 0) {
 				data = OpenPIC_spurious;

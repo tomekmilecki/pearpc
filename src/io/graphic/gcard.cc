@@ -512,6 +512,7 @@ void gcard_debug_print()
 		 * cursor task never runs, and if Mac OS never enabled this line then
 		 * every raise above is discarded and no VBL ever reaches the guest. */
 		extern uint32 PIC_enable_low, PIC_enable_high;
+		fprintf(stderr, "[VBL] ivpr[%d]=%08x (0 = guest registered no handler)\n", IO_PIC_IRQ_GCARD, pic_get_ivpr(IO_PIC_IRQ_GCARD));
 		fprintf(stderr, "[VBL] PIC_enable_low=%08x high=%08x -- IRQ%d %s\n",
 			PIC_enable_low, PIC_enable_high, IO_PIC_IRQ_GCARD,
 			(IO_PIC_IRQ_GCARD < 32

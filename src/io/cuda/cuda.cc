@@ -1996,6 +1996,23 @@ static void *cudaEventLoop(void *arg)
 					(sint16)((rm[0]<<8)|rm[1]), (sint16)((rm[2]<<8)|rm[3]),
 					(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]),
 					cn[0], cn[1], mbs[0]);
+				{
+					/*
+					 * VBLQueue (0x160) is a QHdr: flags(2), qHead(4), qTail(4).
+					 * Empty means no VBL task was ever installed -- so no cursor
+					 * task exists and the cursor device is what is missing.
+					 * Non-empty means tasks are installed and merely starved of
+					 * VBL interrupts, which is a fault on our side of the fence.
+					 */
+					uint8 q[10] = {0};
+					ppc_dma_read(q, LOMEM_BASE + 0x160, 10);
+					uint32 head = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
+					uint32 tail = ((uint32)q[6]<<24)|((uint32)q[7]<<16)|((uint32)q[8]<<8)|q[9];
+					fprintf(stderr, "[VBLQ] flags=%02x%02x qHead=%08x qTail=%08x -- %s\n",
+						q[0], q[1], head, tail,
+						head ? "tasks INSTALLED (starved of VBL)"
+						     : "<== EMPTY: no VBL task ever installed");
+				}
 				probe_video_node_interrupts();
 				usb_debug_print();
 				gcard_debug_print();

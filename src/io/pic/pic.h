@@ -49,6 +49,7 @@ void pic_read(uint32 addr, uint32 &data, int size);
 
 void pic_raise_interrupt(int intr);
 void pic_force_enable(int intr);
+uint32 pic_get_ivpr(int intr);
 void pic_cancel_interrupt(int intr);
 
 void pic_init();
