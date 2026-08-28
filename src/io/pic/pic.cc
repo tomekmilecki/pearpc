@@ -156,6 +156,14 @@ static void openpic_write(uint32 addr, uint32 data, int size)
 		int intr = (reg & 0xffff) >> 5;
 		switch (reg & 0x1f) {
 		case 0x00:
+			/* Compare how the guest programs the display source against a
+			 * source it successfully registers: video's IVPR ends up
+			 * priority 2 / vector 0 / masked, which is neither the untouched
+			 * default (80000040) nor a working registration (00020003), so
+			 * registration starts and stops short.  Log both to see where. */
+			if (intr == IO_PIC_IRQ_GCARD || intr == 26 || intr == 28)
+				fprintf(stderr, "[PICW] src%d ivpr %08x -> %08x\n",
+					intr, OpenPIC_ivpr[intr], data);
 			OpenPIC_ivpr[intr] = data;
 			if (intr < 32) {
 				if (data & 0x80000000) PIC_enable_low &= ~(1U << intr);
@@ -166,6 +174,9 @@ static void openpic_write(uint32 addr, uint32 data, int size)
 			}
 			break;
 		case 0x10:
+			if (intr == IO_PIC_IRQ_GCARD || intr == 26 || intr == 28)
+				fprintf(stderr, "[PICW] src%d idr  %08x -> %08x\n",
+					intr, OpenPIC_idr[intr], data);
 			OpenPIC_idr[intr] = data;
 			break;
 		}

@@ -2013,9 +2013,21 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	aty->addProp(new PromPropInt("class-code", 0x30000));
 	aty->addProp(new PromPropString("device_type", "display"));
 	aty->addProp(new PromPropString("model", "PearPC,display"));
-	/* VBL is delivered now (gcard_raise_interrupt); Mac OS needs it because the
-	 * cursor is moved by a VBL task. */
-	aty->addProp(new PromPropString("Ignore VBL", "no"));
+	/*
+	 * "Ignore VBL" is a MOL-ism the video driver checks.  Setting it to "no"
+	 * only helps if the driver compares the value; if it tests for the
+	 * property's PRESENCE -- which is the common idiom -- then having it at
+	 * all tells the driver to skip VBL, and the driver then never claims its
+	 * interrupt.  That matches what the PIC trace shows: the display source is
+	 * given a priority and a destination like every other source, but alone
+	 * among them never gets a vector and is never unmasked, so no VBL is
+	 * delivered and the cursor VBL task starves.  Tested both ways
+	 * (PEARPC_NO_IGNORE_VBL_PROP=1 omits it): the display source still gets
+	 * vector 0 and stays masked either way, so the property is not the cause.
+	 * Default left as it was.
+	 */
+	if (!getenv("PEARPC_NO_IGNORE_VBL_PROP"))
+		aty->addProp(new PromPropString("Ignore VBL", "no"));
 	aty->addProp(new PromPropInt("width", gDisplay->mClientChar.width));
 	aty->addProp(new PromPropInt("height", gDisplay->mClientChar.height));
 	aty->addProp(new PromPropInt("depth", gDisplay->mClientChar.bytesPerPixel * 8));
