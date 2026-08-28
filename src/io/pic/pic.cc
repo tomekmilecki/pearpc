@@ -238,7 +238,17 @@ void pic_write(uint32 addr, uint32 data, int size)
 		data = 0;
 		break;
 	default:
-		IO_PIC_ERR("unknown service %08x (write(%d) %08x from %08x)\n", addr, size, data, ppc_cpu_get_pc(0));
+		/* Likewise: ignore a write to a register we do not model rather than
+		 * killing the guest. */
+		{
+			static bool warned = false;
+			if (!warned) {
+				warned = true;
+				IO_PIC_WARN("unimplemented register write: %08x (size %d, data %08x, from %08x); "
+					"ignoring and continuing\n", addr, size, data, ppc_cpu_get_pc(0));
+			}
+		}
+		break;
 	}
 	pic_renew_interrupts();
 }
@@ -287,7 +297,21 @@ void pic_read(uint32 addr, uint32 &data, int size)
 		data = 0;
 		break;
 	default:
-		IO_PIC_ERR("unknown service %08x (read(%d) from %08x)\n", addr, size, ppc_cpu_get_pc(0));
+		/*
+		 * Real hardware returns something for a register the model does not
+		 * implement; it does not halt the machine.  Killing the emulator here
+		 * turns a harmless probe into a dead guest -- Mac OS reads 0x34 during
+		 * startup and PearPC died on it.  Report once and read as zero.
+		 */
+		{
+			static bool warned = false;
+			if (!warned) {
+				warned = true;
+				IO_PIC_WARN("unimplemented register read: %08x (size %d, from %08x); "
+					"reading 0 and continuing\n", addr, size, ppc_cpu_get_pc(0));
+			}
+		}
+		data = 0;
 	}
 }
 

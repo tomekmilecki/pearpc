@@ -484,4 +484,24 @@ void gcard_debug_print()
 {
 	fprintf(stderr, "[VBL] raiseCalls=%u vblOn=%d osi39Calls=%u forced=%d\n",
 		gVBLRaises, (int)gVBLon, gVBLCtrlCalls, (int)gVBLForce);
+	/*
+	 * Is the guest's UI actually alive?  Ticks advancing only proves the timer
+	 * interrupt fires -- it would keep counting with Mac OS wedged.  Checksum
+	 * the framebuffer instead: if it never changes between samples, nothing is
+	 * being drawn (not even the menu-bar clock), and "input does nothing" is a
+	 * symptom of a hung system rather than an input bug.
+	 */
+	if (gFrameBuffer) {
+		/* Every byte, not every 64th: a menu-bar clock is a handful of pixels
+		 * and a sparse sample can miss it entirely.  Checksum the menu bar
+		 * separately too -- that is where the clock lives, and it is the one
+		 * thing a live Mac OS redraws without any user input. */
+		uint32 sum = 0, bar = 0;
+		for (uint32 off = 0; off < 640 * 480 * 2; off++)
+			sum = sum * 31u + gFrameBuffer[off];
+		for (uint32 y = 0; y < 20; y++)
+			for (uint32 x = 0; x < 640; x++)
+				bar = bar * 31u + gFrameBuffer[(y * 640 + x) * 2];
+		fprintf(stderr, "[FBSUM] whole=%08x menubar=%08x\n", sum, bar);
+	}
 }
