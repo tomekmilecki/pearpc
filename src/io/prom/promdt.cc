@@ -1734,6 +1734,11 @@ aliases->addProp(new PromPropString("scca", "/pci@80000000/mac-io@5/escc@13000/c
 	 * while our USB CursorDeviceMove calls land on a device nothing draws.
 	 * That is the shape of the observed split -- buttons applied, motion lost.
 	 */
+	/* A Cube has no ADB, so withdraw the input nodes when the OHCI root hub is
+	 * carrying HID devices.  Restoring them was tried against the right
+	 * criterion (does the UI react, does EventQueue fill) and changes nothing:
+	 * the queue stays empty either way, so the missing event post is not the
+	 * ADB Manager being absent. */
 	const bool adbInput = !usb_hid_present();
 	PromNode *adb = new PromNode("adb");
 	via->addNode(adb);

@@ -1773,7 +1773,21 @@ static void *cudaEventLoop(void *arg)
 			 * and the loss is specific to mouse motion; if it does not, the
 			 * problem is broader than the mouse.
 			 */
-			usb_hid_key_event(0x00, true);	/* ADB 'A' down */
+			/*
+			 * Press Return over USB HID.  The keyboard demonstrably works
+			 * (KeyMap reacts), so this is a way past the Multiple Users login
+			 * screen without a pointer -- every mouse test so far has run on
+			 * that screen, which may handle the cursor differently from the
+			 * Finder desktop.
+			 */
+			{
+				/* Down-arrow to highlight a user (the Log in button is dimmed
+				 * until one is selected), then Return to activate it. */
+				static int step = 0;
+				uint8 key = (step++ == 0) ? 0x7d : 0x24;   /* Down, then Return */
+				usb_hid_key_event(key, true);
+				usb_hid_key_event(key, false);
+			}
 			/* (ADB key injection removed: with the ADB nodes withdrawn it cannot
 			 * reach the guest, and it made KeyMap changes ambiguous between the
 			 * ADB and USB paths.) */
@@ -1790,6 +1804,22 @@ static void *cudaEventLoop(void *arg)
 				ppc_dma_read(mt, 0x4000 + 0x828, 4);	/* MTemp: raw, pre-filter */
 				ppc_dma_read(pin, 0x4000 + 0x834, 8);	/* CrsrPin rect */
 				ppc_dma_read(cvis, 0x4000 + 0x8cc, 1);	/* CrsrVis */
+				{
+					/*
+					 * EventQueue (0x14a, a QHdr) tells the two cases apart:
+					 * if HID input is posting events that nothing dispatches
+					 * the queue fills, and if nothing is posted it stays empty.
+					 * KeyMap and MBState update while the UI never reacts, so
+					 * this is the discriminator.
+					 */
+					uint8 eq[10], em[2];
+					ppc_dma_read(eq, 0x4000 + 0x14a, 10);
+					ppc_dma_read(em, 0x4000 + 0x144, 2);	/* SysEvtMask */
+					fprintf(stderr, "[EVTQ] flags=%02x%02x head=%02x%02x%02x%02x "
+						"tail=%02x%02x%02x%02x SysEvtMask=%02x%02x\n",
+						eq[0],eq[1], eq[2],eq[3],eq[4],eq[5],
+						eq[6],eq[7],eq[8],eq[9], em[0],em[1]);
+				}
 				{
 					/* DTQueue (0xd92): QHdr for the Deferred Task Manager.
 					 * USBHIDDriver imports DeferUserFn, so if motion is handed
