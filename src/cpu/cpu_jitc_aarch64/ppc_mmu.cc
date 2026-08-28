@@ -2295,37 +2295,86 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  * or 4 (keyUp).  r12 then holds its TVector, whose first word is the entry
  * point -- which is what a host->guest call needs.
  */
+/* Set by the input path when a click needs posting: 1 = mouseDown, 2 = mouseUp. */
+volatile int gPendingMouseEvent = 0;
+
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
-     * Runs on every one of the keyboard module's 26 CFM import stubs
-     * (lwz r12,disp(r2) with disp in -228..-128).  Glue order is NOT import
-     * order -- the first guess, index 5 -> -208, turned out to be a string
-     * routine -- so identify PostEvent by its arguments instead: r3 is the
-     * event number, so a real call shows a small value, 3 (keyDown) or 4
-     * (keyUp) for the keyboard.  Log only plausible ones, or the ASCII-laden
-     * string calls bury it.
+     * PostEvent's CFM import stub in the USB keyboard module is
+     * lwz r12,-224(r2), identified by its own arguments (r3 = event number).
+     *
+     * The guest calls PostEvent on its own periodically, so rather than build
+     * machinery to CALL guest code -- which would mean trapping a hot
+     * instruction, ending the JIT block every time, and re-entrant execution
+     * with all its failure modes -- borrow a call it is already making and
+     * substitute the arguments.  The event it would have posted is dropped;
+     * the ones seen here when idle are app1Evt (r3 = 12), which nothing needs.
+     *
+     * PostEvent fills the event's "where" from the low-memory Mouse global,
+     * which the cursor shim keeps correct, so the click lands under the
+     * visible pointer without the CursorDeviceManager or VBL.
      */
-    uint32 opc = aCPU.current_opc;
-    sint16 disp = (sint16)(opc & 0xffff);
-    uint32 ea = aCPU.gpr[2] + (sint32)disp;
+    uint32 ea = aCPU.gpr[2] - 224;
     uint32 tvec = 0;
     int r = ppc_read_effective_word(aCPU, ea, tvec);
     if (!r) aCPU.gpr[12] = tvec;
-    /* Only the event numbers that matter: mouseDown/Up (1,2) and keyDown/Up
-     * (3,4).  A plain "small r3" filter fills the log with one chatty import
-     * (disp=-224, r3=12) long before PostEvent is ever reached. */
-    if (aCPU.gpr[3] >= 1 && aCPU.gpr[3] <= 4) {
+
+    /*
+     * lwz r12,-224(r2) is not unique to the keyboard module's PostEvent stub --
+     * other modules' glue shares the encoding and fires far more often, which
+     * both floods the log and risks hijacking an unrelated call.  Discriminate
+     * on the resolved target: PostEvent's TVector points at ROM entry
+     * 0xffd095ec, which is stable across boots (unlike the TVector address
+     * itself, which moves as modules relocate).
+     */
+    uint32 entryPt = 0;
+    ppc_read_effective_word(aCPU, tvec, entryPt);
+    {   /* Diagnostic: what targets actually resolve here while a click is
+         * armed?  If PostEvent's entry differs from the 0xffd095ec seen
+         * earlier, the discriminator is wrong rather than the call missing. */
+        static int d = 0;
+        if (gPendingMouseEvent && d < 12) { d++;
+            fprintf(stderr, "[PEVANY] entry=%08x r3=%u tvec=%08x\n",
+                    entryPt, aCPU.gpr[3], tvec); }
+    }
+    if (entryPt != 0xffd095ecU) return r;
+
+    {   /* Does the real stub fire, and with what? */
+        /* Only log once a click is actually armed: an unconditional cap fills
+         * up during boot with the guest's own app-events and hides the hits
+         * that matter. */
         static int n = 0;
-        if (n < 20) {
+        if (gPendingMouseEvent && n < 10) { n++;
+            fprintf(stderr, "[PEVHIT] r3=%u r4=%08x pending=%d\n",
+                    aCPU.gpr[3], aCPU.gpr[4], gPendingMouseEvent); }
+    }
+    int want = gPendingMouseEvent;
+    /*
+     * Only hijack a call that really is PostEvent: r3 must be a valid event
+     * number (1..15).  This encoding also occurs outside the keyboard
+     * module's stub, and a looser test substituted arguments into an
+     * unrelated call (it displaced "event" 1858576).  Never displace a real
+     * keystroke either.
+     */
+    /*
+     * When idle the guest never calls PostEvent, so there is nothing to
+     * borrow -- the input path therefore injects a synthetic keystroke to
+     * force one, and we displace THAT.  Substituting mouseDown for its
+     * keyDown means the character is never typed and a click is posted in its
+     * place.  So keystrokes are now fair game; the only cost is that a real
+     * key pressed in the same instant is swallowed.
+     */
+    if (want && aCPU.gpr[3] >= 1 && aCPU.gpr[3] <= 15) {
+        gPendingMouseEvent = 0;
+        uint32 wasR3 = aCPU.gpr[3];
+        aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
+        aCPU.gpr[4] = 0;			/* message unused for mouse */
+        static int n = 0;
+        if (n < 10) {
             n++;
-            uint32 entry = 0, toc = 0;
-            ppc_read_effective_word(aCPU, tvec, entry);
-            ppc_read_effective_word(aCPU, tvec + 4, toc);
-            fprintf(stderr, "[PEV] disp=%d r3=%u r4=%08x tvec=%08x entry=%08x%s\n",
-                    (int)disp, aCPU.gpr[3], aCPU.gpr[4], tvec, entry,
-                    (aCPU.gpr[3] == 3 || aCPU.gpr[3] == 4)
-                        ? "  <== PostEvent(keyDown/keyUp)" : "");
+            fprintf(stderr, "[HIJACK] posted mouse event %d (displaced evt %u)\n",
+                    want, wasR3);
         }
     }
     return r;

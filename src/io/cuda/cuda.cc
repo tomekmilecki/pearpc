@@ -553,6 +553,8 @@ static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 #define CLICK_RING 16
 static volatile int gClickRing[CLICK_RING];
 static volatile int gClickHead = 0, gClickTail = 0;
+static int gSyntheticKeyDown = 0;
+static uint64 gSyntheticKeyAt = 0;
 uint32 gLastPostedEl = 0;
 
 static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown);
@@ -1943,7 +1945,54 @@ static void cuda_shim_apply()
 	 * Kept behind PEARPC_CLICK_EVENTS=1 so the experiment is one env var away,
 	 * but writing into guest memory for no benefit is not worth the risk.
 	 */
-	static const int clickEventsOff = getenv("PEARPC_CLICK_EVENTS") ? 0 : 1;
+	/*
+	 * Hand click edges to the PostEvent hijack in ppc_mmu.cc.  Writing records
+	 * into the low-memory EventQueue never worked -- Mac OS does not dequeue
+	 * from it -- so instead the next PostEvent call the guest makes on its own
+	 * gets its arguments substituted for our mouseDown/mouseUp.
+	 */
+	extern volatile int gPendingMouseEvent;
+	/*
+	 * OFF by default.  The hijack only rewrites a genuine PostEvent call, but
+	 * arming it injects a synthetic keystroke to provoke one -- and when the
+	 * hijack does not fire, that keystroke is simply typed into the guest.  A
+	 * stray character on every click is worse than no click.  Enable with
+	 * PEARPC_CLICK_HIJACK=1 to continue the experiment.
+	 */
+	static const int hijackOn = getenv("PEARPC_CLICK_HIJACK") ? 1 : 0;
+	if (hijackOn && gClickHead != gClickTail && !gPendingMouseEvent) {
+		gPendingMouseEvent = gClickRing[gClickHead];
+		gClickHead = (gClickHead + 1) % CLICK_RING;
+		/*
+		 * Force a PostEvent call to hijack: idle Mac OS makes none, and the
+		 * keyboard reliably does.  The synthetic key's own keyDown is what
+		 * gets displaced, so nothing is ever typed.
+		 */
+		usb_hid_key_event(0x00, true);
+		gSyntheticKeyDown = 1;
+		gSyntheticKeyAt = sys_get_hiresclk_ticks();
+		{
+			static int n = 0;
+			if (n < 8) {
+				n++;
+				fprintf(stderr, "[DRAIN2] armed mouse event %d, synthetic key down\n",
+					gPendingMouseEvent);
+			}
+		}
+	}
+	/*
+	 * Release the synthetic key on a timer, not on the hijack completing:
+	 * gating it on that deadlocks -- the key stays held, the guest posts
+	 * nothing more, and the PostEvent call we are waiting to borrow never
+	 * comes.  A full press/release is what actually generates one.
+	 */
+	if (gSyntheticKeyDown &&
+	    sys_get_hiresclk_ticks() - gSyntheticKeyAt >
+	        sys_get_hiresclk_ticks_per_second() / 12) {
+		gSyntheticKeyDown = 0;
+		usb_hid_key_event(0x00, false);
+	}
+	static const int clickEventsOff = 1;
 	if (!clickEventsOff && gClickHead != gClickTail) {
 		uint8 mo[4];
 		if (ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4)) {
@@ -2231,36 +2280,9 @@ static void *cudaEventLoop(void *arg)
 			 * so it sidesteps the dead CursorDeviceManager/VBL chain
 			 * entirely.  Driven purely over the working keyboard.
 			 */
-			static uint64 mkAt = 0;
-			static int mkPhase = 0;
-			if (gKeyScript == 200 && mkPhase == 0) {
-				mkPhase = 1;
-				mkAt = sys_get_hiresclk_ticks();
-				usb_hid_key_event(0x37, true);		/* Command */
-				usb_hid_key_event(0x38, true);		/* Shift   */
-				usb_hid_key_event(0x47, true);		/* keypad Clear */
-				fprintf(stderr, "[MKEYS] Cmd-Shift-Clear down\n");
-			}
-			if (mkPhase && mkAt) {
-				uint64 per = sys_get_hiresclk_ticks_per_second();
-				uint64 el = sys_get_hiresclk_ticks() - mkAt;
-				if (mkPhase == 1 && el > per / 4) {
-					mkPhase = 2;
-					usb_hid_key_event(0x47, false);
-					usb_hid_key_event(0x38, false);
-					usb_hid_key_event(0x37, false);
-					fprintf(stderr, "[MKEYS] released; Mouse Keys should be ON\n");
-				} else if (mkPhase == 2 && el > per) {
-					mkPhase = 3;
-					usb_hid_key_event(0x57, true);	/* keypad 5 = click */
-					fprintf(stderr, "[MKEYS] keypad 5 (click) down\n");
-				} else if (mkPhase == 3 && el > per + per / 4) {
-					mkPhase = 4;
-					mkAt = 0;
-					usb_hid_key_event(0x57, false);
-					fprintf(stderr, "[MKEYS] keypad 5 released\n");
-				}
-			}
+			/* (Mouse Keys probe removed: Easy Access is not installed, and the
+			 * Cmd-Shift combination raised a modal dialog that masked the
+			 * click test.) */
 			static uint64 pressedAt = 0;
 			if (gKeyScript == 420 && !pressedAt) {
 				pressedAt = sys_get_hiresclk_ticks();

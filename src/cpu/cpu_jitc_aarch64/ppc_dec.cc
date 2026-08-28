@@ -1294,9 +1294,7 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
         return flowContinue;
     }
-    if ((aJITC.current_opc & 0xffffff00) == 0x8182ff00 &&
-        (aJITC.current_opc & 0xff) >= 0x1c && (aJITC.current_opc & 0xff) <= 0x80 &&
-        (aJITC.current_opc & 3) == 0) {
+    if (aJITC.current_opc == 0x8182ff20) {	/* PostEvent import stub */
         ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_postevent_trace);
         return flowContinue;
     }
