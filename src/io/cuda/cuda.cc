@@ -991,34 +991,47 @@ static void cuda_start_T1()
  */
 static void scan_for_event_records(const char *tag)
 {
+	/*
+	 * The keyboard's events ARE delivered and drained (keys work at the login
+	 * screen), so a live event queue exists -- but it is not the low-memory
+	 * EventQueue at 0x14a, where anything we link is never dequeued.  Find the
+	 * real one: press a key, then sweep guest RAM for the record it created.
+	 * An EvQEl is qLink(4) qType(2) what(2) message(4) when(4) where(4)
+	 * modifiers(2); match qType == 4 (evType) with a sane what and a recent
+	 * when.  Prints unconditionally so a silent run cannot be mistaken for a
+	 * negative result.
+	 */
 	uint8 tk[4] = {0,0,0,0};
 	ppc_dma_read(tk, 0x4000 + 0x16a, 4);
 	uint32 now = ((uint32)tk[0]<<24)|((uint32)tk[1]<<16)|((uint32)tk[2]<<8)|tk[3];
+	extern uint32 gMemorySize;
+	uint32 limit = gMemorySize;
+	fprintf(stderr, "[EVSCAN:%s] begin: Ticks=%u memSize=%08x\n", tag, now, limit);
 	const uint32 CHUNK = 1u << 20;
-	static uint8 *buf = NULL;
-	if (!buf) buf = (uint8 *)malloc(CHUNK);
-	if (!buf) return;
-	int found = 0;
-	for (uint32 base = 0; base < (128u << 20) && found < 12; base += CHUNK) {
+	uint8 *buf = (uint8 *)malloc(CHUNK);
+	if (!buf) { fprintf(stderr, "[EVSCAN:%s] malloc failed\n", tag); return; }
+	int found = 0, chunks = 0;
+	for (uint32 base = 0; base + CHUNK <= limit && found < 16; base += CHUNK) {
 		if (!ppc_dma_read(buf, base, CHUNK)) continue;
-		for (uint32 i = 0; i + 22 < CHUNK; i += 2) {
-			uint16 qtype = (uint16)((buf[i+4]<<8)|buf[i+5]);
-			if (qtype != 4) continue;			/* evType */
+		chunks++;
+		for (uint32 i = 0; i + 24 < CHUNK; i += 2) {
+			if (buf[i+4] || buf[i+5] != 4) continue;		/* qType == evType */
 			uint16 what = (uint16)((buf[i+6]<<8)|buf[i+7]);
 			if (what < 1 || what > 6) continue;
 			uint32 when = ((uint32)buf[i+12]<<24)|((uint32)buf[i+13]<<16)|
 			              ((uint32)buf[i+14]<<8)|buf[i+15];
-			if (when > now || now - when > 600) continue;	/* last ~10s */
-			fprintf(stderr, "[EVSCAN:%s] @%08x what=%d msg=%02x%02x%02x%02x "
-				"when=%u (now=%u) where=(%d,%d)\n", tag, base + i, what,
+			if (when > now || now - when > 1200) continue;
+			fprintf(stderr, "[EVSCAN:%s] @%08x what=%u msg=%02x%02x%02x%02x when=%u "
+				"(now=%u) where=(%d,%d)\n", tag, base + i, what,
 				buf[i+8], buf[i+9], buf[i+10], buf[i+11], when, now,
 				(sint16)((buf[i+16]<<8)|buf[i+17]),
 				(sint16)((buf[i+18]<<8)|buf[i+19]));
 			found++;
-			if (found >= 12) break;
+			if (found >= 16) break;
 		}
 	}
-	if (!found) fprintf(stderr, "[EVSCAN:%s] no recent event records found\n", tag);
+	free(buf);
+	fprintf(stderr, "[EVSCAN:%s] done: %d record(s) in %d chunk(s)\n", tag, found, chunks);
 }
 
 static void probe_event_queue()
@@ -2437,6 +2450,7 @@ static void *cudaEventLoop(void *arg)
 						head ? "tasks INSTALLED (starved of VBL)"
 						     : "<== EMPTY: no VBL task ever installed");
 				}
+				scan_for_event_records("probe");
 				probe_event_queue();
 				probe_video_driver_failure();
 				pic_debug_print();
