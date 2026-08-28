@@ -969,13 +969,24 @@ static void probe_video_node_interrupts()
 			/* look for AAPL,interrupts within the surrounding registry entry */
 			uint32 lo = i > 8192 ? i - 8192 : 0;
 			uint32 hi = (i + 8192 < want) ? i + 8192 : want;
-			bool found = false;
-			for (uint32 j = lo; j + 15 < hi; j++) {
-				if (memcmp(buf + j, "AAPL,interrupts", 15) == 0) { found = true; break; }
+			/* A node whose interrupt really resolved carries the whole set,
+			 * not just AAPL,interrupts: the driver's VSLNewInterruptService /
+			 * InstallInterruptFunctions need the index and vectors too. */
+			static const char *props[] = {
+				"AAPL,interrupts", "AAPL,interrupt-index",
+				"AAPL,interrupt-vectors", "AAPL,interrupt-priorities" };
+			char line[256]; int off = 0; bool found = false;
+			for (unsigned k = 0; k < 4; k++) {
+				size_t plen = strlen(props[k]);
+				bool got = false;
+				for (uint32 j = lo; j + plen < hi; j++)
+					if (memcmp(buf + j, props[k], plen) == 0) { got = true; break; }
+				if (k == 0) found = got;
+				off += snprintf(line + off, sizeof line - off, " %s=%s",
+					props[k] + 5, got ? "yes" : "NO");
 			}
 			if (found) withIrq++;
-			fprintf(stderr, "[NREG] PearPCVideo at %08x -- AAPL,interrupts %s\n",
-				base + i, found ? "PRESENT" : "<== MISSING");
+			fprintf(stderr, "[NREG] PearPCVideo at %08x --%s\n", base + i, line);
 			if (hits >= 8) break;
 		}
 		/* count AAPL,interrupts overall, as a sanity check that the ROM makes them at all */
@@ -2013,6 +2024,7 @@ static void *cudaEventLoop(void *arg)
 						head ? "tasks INSTALLED (starved of VBL)"
 						     : "<== EMPTY: no VBL task ever installed");
 				}
+				pic_debug_print();
 				probe_video_node_interrupts();
 				usb_debug_print();
 				gcard_debug_print();

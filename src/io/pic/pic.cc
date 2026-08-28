@@ -69,6 +69,25 @@ static bool openpic_pending(int intr)
  * transport while the keyboard, posted at interrupt time, still works.
  * Unmask on the guest's behalf, but only once it has asked for VBL.
  */
+unsigned long gPicAckTotal = 0;
+unsigned long gPicAckPerSrc[64];
+
+/* Which sources does the guest actually take interrupts on?  If this reports
+ * no acknowledged interrupts at all, Mac OS is polling its devices and no
+ * OpenPIC source can ever deliver VBL, however it is unmasked. */
+void pic_debug_print()
+{
+	fprintf(stderr, "[PICSTAT] acknowledged interrupts total=%lu ctpr=%u\n",
+		gPicAckTotal, OpenPIC_ctpr);
+	for (int i = 0; i < 64; i++) {
+		if (!gPicAckPerSrc[i] && !(OpenPIC_ivpr[i] & 0xffff)) continue;
+		fprintf(stderr, "[PICSTAT]   src%-2d ivpr=%08x %s acks=%lu\n",
+			i, OpenPIC_ivpr[i],
+			(OpenPIC_ivpr[i] & 0x80000000) ? "MASKED  " : "unmasked",
+			gPicAckPerSrc[i]);
+	}
+}
+
 uint32 pic_get_ivpr(int intr)
 {
 	return (intr >= 0 && intr < 64) ? OpenPIC_ivpr[intr] : 0;
@@ -199,6 +218,8 @@ static void openpic_read(uint32 addr, uint32 &data, int size)
 					priority = candidatePriority;
 				}
 			}
+			if (selected >= 0) gPicAckTotal++;
+			if (selected >= 0 && selected < 64) gPicAckPerSrc[selected]++;
 			if (selected == IO_PIC_IRQ_GCARD) {
 				/* Did the guest ever register a vector for the video source?
 				 * ivpr==0 means no handler was installed, so delivering the
