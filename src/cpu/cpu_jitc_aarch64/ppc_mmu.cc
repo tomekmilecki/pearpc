@@ -2284,6 +2284,53 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  * (The earlier trap on lbz r0,28(r31) was worthless: that encoding is common
  * across the whole guest, so its hits came from unrelated code.)
  */
+/*
+ * Locate PostEvent at runtime.
+ *
+ * The USB keyboard module posts every keystroke through PostEvent, and its CFM
+ * import glue is `lwz r12,disp(r2)` then `bctr`.  Its 26 stubs carry TOC
+ * displacements stepping by 4 from -228 to -128, so in import order index 5 --
+ * PostEvent -- is -208, encoding 0x8182ff30.  Confirm by the arguments: at the
+ * glue, r3 is the event number, so a real PostEvent call shows r3 = 3 (keyDown)
+ * or 4 (keyUp).  r12 then holds its TVector, whose first word is the entry
+ * point -- which is what a host->guest call needs.
+ */
+extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
+{
+    /*
+     * Runs on every one of the keyboard module's 26 CFM import stubs
+     * (lwz r12,disp(r2) with disp in -228..-128).  Glue order is NOT import
+     * order -- the first guess, index 5 -> -208, turned out to be a string
+     * routine -- so identify PostEvent by its arguments instead: r3 is the
+     * event number, so a real call shows a small value, 3 (keyDown) or 4
+     * (keyUp) for the keyboard.  Log only plausible ones, or the ASCII-laden
+     * string calls bury it.
+     */
+    uint32 opc = aCPU.current_opc;
+    sint16 disp = (sint16)(opc & 0xffff);
+    uint32 ea = aCPU.gpr[2] + (sint32)disp;
+    uint32 tvec = 0;
+    int r = ppc_read_effective_word(aCPU, ea, tvec);
+    if (!r) aCPU.gpr[12] = tvec;
+    /* Only the event numbers that matter: mouseDown/Up (1,2) and keyDown/Up
+     * (3,4).  A plain "small r3" filter fills the log with one chatty import
+     * (disp=-224, r3=12) long before PostEvent is ever reached. */
+    if (aCPU.gpr[3] >= 1 && aCPU.gpr[3] <= 4) {
+        static int n = 0;
+        if (n < 20) {
+            n++;
+            uint32 entry = 0, toc = 0;
+            ppc_read_effective_word(aCPU, tvec, entry);
+            ppc_read_effective_word(aCPU, tvec + 4, toc);
+            fprintf(stderr, "[PEV] disp=%d r3=%u r4=%08x tvec=%08x entry=%08x%s\n",
+                    (int)disp, aCPU.gpr[3], aCPU.gpr[4], tvec, entry,
+                    (aCPU.gpr[3] == 3 || aCPU.gpr[3] == 4)
+                        ? "  <== PostEvent(keyDown/keyUp)" : "");
+        }
+    }
+    return r;
+}
+
 extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &aCPU)
 {
     aCPU.gpr[3] = aCPU.gpr[29] + 2;

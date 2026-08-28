@@ -1227,6 +1227,7 @@ void FASTCALL ppc_exec_opc(PPC_CPU_State &aCPU)
 extern "C" int ppc_opc_hidtrace_load(PPC_CPU_State &);
 extern "C" int ppc_opc_iif_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &);
+extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &);
 
 /*
  * video.x calls VSLNewInterruptService(&entry, 'vbl ', &serviceID) at module
@@ -1291,6 +1292,12 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
      */
     if (aJITC.current_opc == 0x3c807662) {
         ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
+        return flowContinue;
+    }
+    if ((aJITC.current_opc & 0xffffff00) == 0x8182ff00 &&
+        (aJITC.current_opc & 0xff) >= 0x1c && (aJITC.current_opc & 0xff) <= 0x80 &&
+        (aJITC.current_opc & 3) == 0) {
+        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_postevent_trace);
         return flowContinue;
     }
     if (aJITC.current_opc == 0x387d0002) {
