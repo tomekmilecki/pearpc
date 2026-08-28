@@ -544,12 +544,20 @@ static void pmu_transfer_byte()
     if (gCUDA.pmuResponsePosition >= gCUDA.pmuResponseLength) gCUDA.pmuState = pmu_idle;
 }
 
+/* Ticks (0x16a) is frozen while the CPU runs and DEC is delivered.  Count the
+ * VIA tick sources so a run can say which of them never fires. */
+static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
+
+/* Timed key-injection script; -1 idle, otherwise elapsed ms. */
+static int gKeyScript = -1;
+
 static void cuda_renew_interrupt()
 {
 	if (gCUDA.rIFR & gCUDA.rIER & (SR_INT | T1_INT | T2_INT)) {
 		gCUDA.rIFR |= 0x80;
 		if (!gCUDA.IRQ_asserted) {
 			gCUDA.IRQ_asserted = true;
+			gCudaIrqAsserts++;
 			pic_raise_interrupt(IO_PIC_IRQ_CUDA);
 		}
 	} else {
@@ -898,6 +906,7 @@ static void cuda_update_T1()
 		gCUDA.rT1CL = T1;
 		gCUDA.rT1CH = T1 >> 8;
 		gCUDA.rIFR |= T1_INT;
+		gT1Raises++;
 		cuda_renew_interrupt();
 		//
 //		uint64 tmp = gCUDA.T1_end - clk;
@@ -909,6 +918,7 @@ static void cuda_update_T1()
 		gCUDA.rT1CL = 0xff;
 		gCUDA.rT1CH = 0xff;
 		gCUDA.rIFR |= T1_INT;
+		gT1Raises++;
 		cuda_renew_interrupt();
 	}
 }
@@ -1742,6 +1752,16 @@ static void *cudaEventLoop(void *arg)
 		cuda_update_T2();
 		cuda_update_sr_interrupt();
 		sys_unlock_mutex(gCUDAMutex);
+		if (gKeyScript >= 0) {
+			/* Realistic pointer motion: ~50 small reports at the 8ms poll
+			 * cadence, totalling (200,150).  A real trackpad moves the
+			 * cursor this way; the previous single (60,90) jump was not a
+			 * fair test of the guest's motion handling. */
+			if (gKeyScript < 400 && (gKeyScript % 8) == 0)
+				usb_hid_mouse_event(4, 3, false, false, false);
+			if (gKeyScript >= 500) gKeyScript = -2;			/* done */
+			gKeyScript++;
+		}
 		if (gDebugInjectMouseMotion) {
 			gDebugInjectMouseMotion = 0;
 			gPktVariant = (gPktVariant + 1) & 3;
@@ -1765,7 +1785,9 @@ static void *cudaEventLoop(void *arg)
 			 * the lbz that loads 0x5a, which identifies the code actually
 			 * reading our report -- the module disassembled earlier provably
 			 * never executes. */
-			usb_hid_mouse_event(0x3c, 0x5a, false, false, false);
+			/* Motion is now driven by the timed script below, as a stream of
+			 * small deltas -- that is what a real trackpad delivers, and one
+			 * large jump is not a fair test of the guest's motion path. */
 			/*
 			 * Also press a key over USB HID.  A keyboard boot report carries
 			 * its data past byte 0 -- the same part of a mouse report that is
@@ -1786,15 +1808,14 @@ static void *cudaEventLoop(void *arg)
 				 * so this says whether either path reaches the Event Manager.
 				 * ADB is only wired up when pci_usb_hid = 0 (the device tree
 				 * withdraws its nodes otherwise). */
-				usb_hid_key_event(0x00, true);
-				usb_hid_key_event(0x00, false);
-				SystemEvent kev = {};
-				kev.type = sysevKey;
-				kev.key.keycode = 0x00;		/* ADB 'A' */
-				kev.key.pressed = true;
-				tryProcessCudaEvent(kev);
-				kev.key.pressed = false;
-				tryProcessCudaEvent(kev);
+				/* Start a timed key script.  Press and release must NOT be
+				 * issued back to back: usbhid_key_event keeps one current-state
+				 * report behind a single reportPending flag, so an immediate
+				 * release overwrites the press and the guest -- which polls the
+				 * interrupt endpoint every ~8ms -- only ever sees an empty
+				 * report.  The event loop below holds each key for ~120ms, which
+				 * is what a real keystroke looks like. */
+				gKeyScript = 0;
 			}
 			/* (ADB key injection removed: with the ADB nodes withdrawn it cannot
 			 * reach the guest, and it made KeyMap changes ambiguous between the
@@ -1832,6 +1853,20 @@ static void *cudaEventLoop(void *arg)
 					ppc_dma_read(kl, 0x4000 + 0x184, 2);	/* KeyLast */
 					ppc_dma_read(kt, 0x4000 + 0x186, 4);	/* KeyTime */
 					ppc_dma_read(tk, 0x4000 + 0x16a, 4);	/* Ticks   */
+					{
+						/*
+						 * Does guest time advance?  If it does not, the
+						 * menu-bar clock would redraw the same digits and the
+						 * framebuffer checksum would be identical even on a
+						 * perfectly healthy system -- so the liveness test
+						 * needs this to be conclusive.  Time (0x20c) is
+						 * seconds since 1904.
+						 */
+						uint8 tm[4];
+						ppc_dma_read(tm, 0x4000 + 0x20c, 4);
+						fprintf(stderr, "[TIME] Time=%02x%02x%02x%02x\n",
+							tm[0],tm[1],tm[2],tm[3]);
+					}
 					fprintf(stderr, "[EVT2] KeyLast=%02x%02x KeyTime=%02x%02x%02x%02x Ticks=%02x%02x%02x%02x\n",
 						kl[0],kl[1], kt[0],kt[1],kt[2],kt[3], tk[0],tk[1],tk[2],tk[3]);
 					fprintf(stderr, "[EVTQ] flags=%02x%02x head=%02x%02x%02x%02x "
@@ -1859,6 +1894,22 @@ static void *cudaEventLoop(void *arg)
 					cn[0], cn[1], mbs[0]);
 				usb_debug_print();
 				gcard_debug_print();
+				{
+					/* Is the 60Hz tick source alive, and does Ticks follow it? */
+					uint8 tk[4] = {0,0,0,0}, tm[4] = {0,0,0,0}, kl[6] = {0,0,0,0,0,0};
+					ppc_dma_read(tk, LOMEM_BASE + 0x16a, 4);
+					ppc_dma_read(tm, LOMEM_BASE + 0x20c, 4);
+					/* KeyLast (0x184) / KeyTime (0x186) change only when a key
+					 * event is actually posted to the Event Manager. */
+					ppc_dma_read(kl, LOMEM_BASE + 0x184, 6);
+					fprintf(stderr, "[TICK] Ticks=%02x%02x%02x%02x Time=%02x%02x%02x%02x "
+					        "KeyLast=%02x%02x KeyTime=%02x%02x%02x%02x "
+					        "T1run=%d rIER=%02x rIFR=%02x T1raises=%lu cudaIRQ=%lu\n",
+					        tk[0],tk[1],tk[2],tk[3], tm[0],tm[1],tm[2],tm[3],
+					        kl[0],kl[1], kl[2],kl[3],kl[4],kl[5],
+					        gCUDA.T1_running ? 1 : 0, gCUDA.rIER, gCUDA.rIFR,
+					        gT1Raises, gCudaIrqAsserts);
+				}
 				fprintf(stderr, "[PROBE] variant=%d RawMouse v=%d h=%d KeyMap=%02x%02x%02x%02x | "
 				        "queued=%d delivered=%d gpioReads=%d intBits=%02x mask=%02x asserted=%d\n",
 				        gPktVariant, (rm[0] << 8) | rm[1], (rm[2] << 8) | rm[3],

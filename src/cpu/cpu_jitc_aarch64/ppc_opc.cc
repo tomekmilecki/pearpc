@@ -86,6 +86,24 @@ void FASTCALL writeDEC(PPC_CPU_State &aCPU, uint32 newdec)
 
         sys_set_timer(gDECtimer, 0, q, false);
     }
+    {
+        /*
+         * Watch what the guest actually programs.  aCPU.dec is unsigned, so a
+         * write with bit 31 set takes the else branch above and schedules the
+         * next decrementer interrupt from a ~4.29e9 count -- minutes away
+         * rather than milliseconds.  That would stall every periodic task and
+         * freeze Ticks, the clock and the UI, which is what is observed.
+         */
+        static int t = 0;
+        if (t < 25) {
+            t++;
+            uint64 q = 1000000000ULL * (uint64)aCPU.dec / gClientTimeBaseFrequency;
+            fprintf(stderr, "[DEC] write %08x (%s) -> timer %llu ns%s\n",
+                newdec, (newdec & 0x80000000) ? "negative" : "positive",
+                (unsigned long long)q,
+                (newdec & 0x80000000) ? "   <-- suspicious" : "");
+        }
+    }
     gDECwriteValue = aCPU.dec;
     gDECwriteITB = ppc_get_cpu_ideal_timebase();
 }

@@ -96,6 +96,14 @@ bool FASTCALL ppc_exception(PPC_CPU_State &aCPU, uint32 type, uint32 flags, uint
         aCPU.srr[1] = (aCPU.msr & 0x87c0ffff) | flags;
         break;
     case PPC_EXC_DEC:
+        /* Are periodic interrupts actually reaching the guest?  Ticks (0x16a)
+         * is frozen, so either they are not delivered or the handler does not
+         * advance it.  Count deliveries to tell those apart. */
+        {
+            static unsigned long decCount = 0;
+            if ((++decCount % 200) == 0)
+                fprintf(stderr, "[DECEXC] delivered=%lu\n", decCount);
+        }
         aCPU.srr[0] = aCPU.pc;
         aCPU.srr[1] = aCPU.msr & 0x87c0ffff;
         break;

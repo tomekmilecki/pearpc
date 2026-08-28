@@ -234,7 +234,18 @@ static int gCurrentGraphicMode;
 void gcard_raise_interrupt()
 {
 	gVBLRaises++;
-	if (gVBLon || gVBLForce) pic_raise_interrupt(IO_PIC_IRQ_GCARD);
+	if (!(gVBLon || gVBLForce)) return;
+	/*
+	 * Drop the line before asserting it again.  A PCI interrupt is level
+	 * triggered and the OpenPIC keeps the source pending until the device
+	 * de-asserts, so asserting without ever clearing leaves it latched after
+	 * the first VBL: the guest sees no further edges, its 60Hz tick handler
+	 * stops running, and Ticks (0x16a) freezes -- which stalls the clock, the
+	 * UI redraw and event dispatch.  The same defect was fixed in the OHCI
+	 * controller; the video card was missed.
+	 */
+	pic_cancel_interrupt(IO_PIC_IRQ_GCARD);
+	pic_raise_interrupt(IO_PIC_IRQ_GCARD);
 }
 
 void gcard_osi(int cpu)

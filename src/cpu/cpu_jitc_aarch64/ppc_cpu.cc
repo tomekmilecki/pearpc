@@ -112,6 +112,19 @@ void ppc_cpu_wakeup()
 
 static void decTimerCB(sys_timer t)
 {
+    /* The C++ ppc_exception() DEC counter reads zero, but the JIT delivers DEC
+     * purely in asm, so that proved nothing.  Ask instead, from here:
+     *  - does the host timer fire at all?
+     *  - was the PREVIOUS dec_exception still pending, i.e. never consumed?
+     *  - is MSR[EE] set, without which the heartbeat refuses to deliver? */
+    {
+        static unsigned long cbCount = 0, stillPending = 0, eeClear = 0;
+        if (gCPU->dec_exception) stillPending++;
+        if (!(gCPU->msr & 0x8000)) eeClear++;
+        if ((++cbCount % 100) == 0)
+            fprintf(stderr, "[DECCB] fired=%lu stillPending=%lu eeClear=%lu msr=%08x\n",
+                    cbCount, stillPending, eeClear, gCPU->msr);
+    }
     ppc_cpu_atomic_raise_dec_exception(*gCPU);
     ppc_cpu_wakeup();
 }
