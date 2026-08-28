@@ -1812,9 +1812,20 @@ static void *cudaEventLoop(void *arg)
 					 * KeyMap and MBState update while the UI never reacts, so
 					 * this is the discriminator.
 					 */
-					uint8 eq[10], em[2];
+					uint8 eq[10], em[2], kl[2], kt[4], tk[4];
 					ppc_dma_read(eq, 0x4000 + 0x14a, 10);
 					ppc_dma_read(em, 0x4000 + 0x144, 2);	/* SysEvtMask */
+					/*
+					 * An empty queue does not prove nothing was posted --
+					 * GetNextEvent drains it, so a polling app keeps it empty.
+					 * KeyLast/KeyTime latch when a key event IS posted, and
+					 * Ticks gives a reference for whether KeyTime is recent.
+					 */
+					ppc_dma_read(kl, 0x4000 + 0x184, 2);	/* KeyLast */
+					ppc_dma_read(kt, 0x4000 + 0x186, 4);	/* KeyTime */
+					ppc_dma_read(tk, 0x4000 + 0x16a, 4);	/* Ticks   */
+					fprintf(stderr, "[EVT2] KeyLast=%02x%02x KeyTime=%02x%02x%02x%02x Ticks=%02x%02x%02x%02x\n",
+						kl[0],kl[1], kt[0],kt[1],kt[2],kt[3], tk[0],tk[1],tk[2],tk[3]);
 					fprintf(stderr, "[EVTQ] flags=%02x%02x head=%02x%02x%02x%02x "
 						"tail=%02x%02x%02x%02x SysEvtMask=%02x%02x\n",
 						eq[0],eq[1], eq[2],eq[3],eq[4],eq[5],
