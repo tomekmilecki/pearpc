@@ -549,6 +549,7 @@ static void pmu_transfer_byte()
 static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 
 /* Timed key-injection script; -1 idle, otherwise elapsed ms. */
+static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown);
 static int gKeyScript = -1;
 
 /* PEARPC_BOOT_SHIFT=1 holds the Shift key across the extension-loading phase
@@ -961,6 +962,48 @@ static void cuda_start_T1()
  * really failed, and the driver never got as far as registering its VBL
  * interrupt service.
  */
+/*
+ * Read-only reconnaissance of Mac OS's OS event queue, before writing to it.
+ *
+ * PostEvent takes a record from the pool at SysEvtBuf (0x146), which holds
+ * EvtBufCnt+1 (0x154) elements, and links it onto EventQueue (0x14a).  An
+ * EvQEl is qLink(4) qType(2) evtQWhat(2) evtQMessage(4) evtQWhen(4)
+ * evtQWhere(4) evtQModifiers(2) = 22 bytes.  Confirm the pool pointer, the
+ * count and the queue links look sane, and that the linked elements really do
+ * land on a regular stride inside the pool, before trusting any of it.
+ */
+static void probe_event_queue()
+{
+	uint8 b[4], c[2], q[10];
+	if (!ppc_dma_read(b, 0x4000 + 0x146, 4)) return;
+	uint32 buf = ((uint32)b[0]<<24)|((uint32)b[1]<<16)|((uint32)b[2]<<8)|b[3];
+	if (!ppc_dma_read(c, 0x4000 + 0x154, 2)) return;
+	int cnt = ((c[0]<<8)|c[1]) + 1;
+	if (!ppc_dma_read(q, 0x4000 + 0x14a, 10)) return;
+	uint32 head = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
+	uint32 tail = ((uint32)q[6]<<24)|((uint32)q[7]<<16)|((uint32)q[8]<<8)|q[9];
+	fprintf(stderr, "[EVQ] SysEvtBuf=%08x EvtBufCnt+1=%d qFlags=%02x%02x qHead=%08x qTail=%08x\n",
+		buf, cnt, q[0], q[1], head, tail);
+	if (!buf || cnt <= 0 || cnt > 256) {
+		fprintf(stderr, "[EVQ]   pool looks wrong -- do not write\n");
+		return;
+	}
+	uint32 p = head;
+	int n = 0;
+	while (p && n < cnt + 2) {
+		uint8 e[22];
+		if (!ppc_dma_read(e, p, 22)) break;
+		long delta = (long)p - (long)buf;
+		fprintf(stderr, "[EVQ]   el@%08x (buf%+ld, /22=%ld rem=%ld) qType=%d what=%d "
+			"where=(%d,%d)\n", p, delta, delta/22, delta%22,
+			(e[4]<<8)|e[5], (e[6]<<8)|e[7],
+			(sint16)((e[16]<<8)|e[17]), (sint16)((e[18]<<8)|e[19]));
+		p = ((uint32)e[0]<<24)|((uint32)e[1]<<16)|((uint32)e[2]<<8)|e[3];
+		n++;
+	}
+	fprintf(stderr, "[EVQ]   %d element(s) linked\n", n);
+}
+
 static void probe_video_driver_failure()
 {
 	static const char *reasons[] = {
@@ -1630,6 +1673,89 @@ static volatile int gShimPending;
  * the motion bytes, so nothing else moves it.
  */
 static int gCudaShimEnabled = 1;	/* CONCLUSIVELY dead: with Mouse(0x830) reading 460,12 the arrow still drew at 15,15 -- Mac OS 9 keeps the drawn cursor in Cursor Manager private state, reachable only via CursorDeviceMove */
+/*
+ * Post a mouse event into Mac OS's OS event queue, the way PostEvent does.
+ *
+ * The guest's mouse module never posts events -- MBState flips but the Finder
+ * and dialogs respond to mouseDown/mouseUp, so clicks do nothing.  The
+ * keyboard posts fine through the same driver, so the Event Manager works;
+ * only the mouse side is missing.  Fill that in here.
+ *
+ * PostEvent takes a record from the pool at SysEvtBuf (0x146), which holds
+ * EvtBufCnt+1 (0x154) of them, and links it onto EventQueue (0x14a).  EvQEl:
+ * qLink(4) qType(2) evtQWhat(2) evtQMessage(4) evtQWhen(4) evtQWhere(4)
+ * evtQModifiers(2) = 22 bytes.  Reconnaissance on this guest: pool at
+ * 00ad96a0, 48 elements, queue empty.  Every read is validated and this bails
+ * rather than write anything it is unsure of.
+ */
+#define EVQ_ELEM_SIZE 22
+
+static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
+{
+	uint8 b[4], c[2], q[10];
+	if (!ppc_dma_read(b, LOMEM_BASE + 0x146, 4)) return false;
+	uint32 buf = ((uint32)b[0]<<24)|((uint32)b[1]<<16)|((uint32)b[2]<<8)|b[3];
+	if (!ppc_dma_read(c, LOMEM_BASE + 0x154, 2)) return false;
+	int cnt = ((c[0]<<8)|c[1]) + 1;
+	if (!buf || cnt <= 0 || cnt > 256) return false;
+
+	uint8 m[2];
+	if (!ppc_dma_read(m, LOMEM_BASE + 0x144, 2)) return false;
+	uint16 mask = (uint16)((m[0]<<8)|m[1]);
+	if (!(mask & (1 << what))) return false;	/* masked off, as PostEvent checks */
+
+	if (!ppc_dma_read(q, LOMEM_BASE + 0x14a, 10)) return false;
+	uint32 head = ((uint32)q[2]<<24)|((uint32)q[3]<<16)|((uint32)q[4]<<8)|q[5];
+	uint32 tail = ((uint32)q[6]<<24)|((uint32)q[7]<<16)|((uint32)q[8]<<8)|q[9];
+
+	bool used[256];
+	memset(used, 0, sizeof used);
+	uint32 p = head;
+	for (int n = 0; p && n < cnt + 2; n++) {
+		long d = (long)p - (long)buf;
+		if (d >= 0 && d % EVQ_ELEM_SIZE == 0 && d / EVQ_ELEM_SIZE < cnt)
+			used[d / EVQ_ELEM_SIZE] = true;
+		uint8 l[4];
+		if (!ppc_dma_read(l, p, 4)) return false;
+		p = ((uint32)l[0]<<24)|((uint32)l[1]<<16)|((uint32)l[2]<<8)|l[3];
+	}
+	int slot = -1;
+	for (int i = 0; i < cnt; i++) if (!used[i]) { slot = i; break; }
+	if (slot < 0) return false;
+	uint32 el = buf + (uint32)slot * EVQ_ELEM_SIZE;
+
+	uint8 tk[4] = {0,0,0,0};
+	ppc_dma_read(tk, LOMEM_BASE + 0x16a, 4);			/* Ticks */
+
+	uint8 e[EVQ_ELEM_SIZE];
+	memset(e, 0, sizeof e);
+	e[4] = 0; e[5] = 5;						/* qType = evType */
+	e[6] = (uint8)(what >> 8); e[7] = (uint8)what;			/* evtQWhat */
+	e[12] = tk[0]; e[13] = tk[1]; e[14] = tk[2]; e[15] = tk[3];	/* evtQWhen */
+	e[16] = (uint8)(v >> 8); e[17] = (uint8)v;			/* where.v */
+	e[18] = (uint8)(h >> 8); e[19] = (uint8)h;			/* where.h */
+	uint16 mods = buttonDown ? 0x0000 : 0x0080;	/* btnState set while UP */
+	e[20] = (uint8)(mods >> 8); e[21] = (uint8)mods;
+	if (!ppc_dma_write(el, e, sizeof e)) return false;
+
+	uint8 link[4] = { (uint8)(el>>24), (uint8)(el>>16), (uint8)(el>>8), (uint8)el };
+	if (tail) {
+		if (!ppc_dma_write(tail, link, 4)) return false;		/* tail->qLink */
+	} else {
+		if (!ppc_dma_write(LOMEM_BASE + 0x14a + 2, link, 4)) return false;	/* qHead */
+	}
+	if (!ppc_dma_write(LOMEM_BASE + 0x14a + 6, link, 4)) return false;		/* qTail */
+	{
+		static int n = 0;
+		if (n < 12) {
+			n++;
+			fprintf(stderr, "[POST] what=%d at (%d,%d) slot=%d el=%08x\n",
+				what, h, v, slot, el);
+		}
+	}
+	return true;
+}
+
 static void cuda_shim_write(int dx, int dy, bool button);
 
 void cuda_shim_mouse(int dx, int dy, bool button)
@@ -1638,6 +1764,27 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 	gShimDy += dy;
 	gShimButton = button ? 1 : 0;
 	gShimPending = 1;
+
+	/*
+	 * Post the click edge here, not from cuda_shim_write().  That runs out of
+	 * cuda_shim_apply(), which only fires on a guest VIA *read* and was
+	 * observed not to fire at all across a 250ms press -- and since the shim
+	 * keeps only the latest button state, a press and release that land
+	 * between two applies coalesce and the click vanishes.  Posting on the
+	 * edge, at whatever position Mac OS currently believes the pointer is,
+	 * cannot miss it.
+	 */
+	static int prevB = 0;
+	int b = button ? 1 : 0;
+	if (gCudaShimEnabled && prevB != b) {
+		prevB = b;
+		uint8 mo[4];
+		if (ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4)) {
+			sint16 v = (sint16)((mo[0] << 8) | mo[1]);
+			sint16 h = (sint16)((mo[2] << 8) | mo[3]);
+			post_os_event(b ? 1 : 2, v, h, button);
+		}
+	}
 }
 
 /* Runs on the CPU thread, from the VIA register path. */
@@ -1691,6 +1838,14 @@ static void cuda_shim_write(int dx, int dy, bool button)
 
 	uint8 mb = button ? 0x00 : 0x80;			/* active low */
 	ppc_dma_write(LOMEM_BASE + LOMEM_MBSTATE, &mb, 1);
+
+	/*
+	 * MBState alone is not enough: the Finder and dialogs react to
+	 * mouseDown/mouseUp events, not to the button global.  The guest's mouse
+	 * module never posts them, so post them ourselves on each edge, at the
+	 * position Mac OS now believes the pointer is.
+	 */
+	/* (the click edge is posted from cuda_shim_mouse, see there) */
 }
 
 static bool cudaEventHandler(const SystemEvent &ev)
@@ -1870,7 +2025,7 @@ static void *cudaEventLoop(void *arg)
 			 * ran on the Multiple Users login screen, which may not run a
 			 * normal cursor environment; this gets to the desktop first.
 			 */
-			if (gKeyScript < 400 && (gKeyScript % 8) == 0) {
+			if (gKeyScript < 300 && (gKeyScript % 8) == 0) {
 				/* Drive toward the login window's "Log in" button, then
 				 * click it: if MBState alone is enough, the UI reacts and no
 				 * event posting is needed; if not, the Event Manager must be
@@ -1893,16 +2048,44 @@ static void *cudaEventLoop(void *arg)
 				mev.mouse.rely = 4;
 				tryProcessCudaEvent(mev);
 			}
-			if (gKeyScript == 420) {			/* button down */
+			if (gKeyScript == 400) {
+				/* Park the pointer exactly on the "IGA" row of the login
+				 * list, so the click test does not depend on how many
+				 * relative steps happened to be applied. */
+				sint16 tv = 187, th = 337;
+				uint8 pt[4] = { (uint8)(tv>>8), (uint8)tv,
+				                (uint8)(th>>8), (uint8)th };
+				ppc_dma_write(LOMEM_BASE + 0x82c, pt, 4);	/* RawMouse */
+				ppc_dma_write(LOMEM_BASE + 0x830, pt, 4);	/* Mouse    */
+				fprintf(stderr, "[CLICK] parked at (h=%d,v=%d)\n", th, tv);
+			}
+			/*
+			 * Hold the button in WALL-CLOCK time, not loop iterations: this
+			 * loop spins far faster than 1ms, so a down at step 420 and an up
+			 * at 1200 happened within the same millisecond and the shim, which
+			 * only keeps the latest button state, coalesced them away -- no
+			 * edge, no event.
+			 */
+			static uint64 pressedAt = 0;
+			if (gKeyScript == 420 && !pressedAt) {
+				pressedAt = sys_get_hiresclk_ticks();
 				usb_hid_mouse_event(0, 0, true, false, false);
 				cuda_shim_mouse(0, 0, true);
 				fprintf(stderr, "[CLICK] button DOWN\n");
 			}
-			if (gKeyScript == 560) {			/* button up */
-				usb_hid_mouse_event(0, 0, false, false, false);
-				cuda_shim_mouse(0, 0, false);
-				fprintf(stderr, "[CLICK] button UP\n");
+			if (pressedAt) {
+				uint64 per = sys_get_hiresclk_ticks_per_second();
+				if (sys_get_hiresclk_ticks() - pressedAt > per / 4) {   /* 250ms */
+					pressedAt = 0;
+					usb_hid_mouse_event(0, 0, false, false, false);
+					cuda_shim_mouse(0, 0, false);
+					fprintf(stderr, "[CLICK] button UP (held 250ms)\n");
+				} else {
+					/* keep re-asserting so an apply cannot miss the down */
+					cuda_shim_mouse(0, 0, true);
+				}
 			}
+
 			if (gKeyScript == 500) {
 				/*
 				 * Does the VBL cursor task run at all?  On Mac OS 9 input sets
@@ -1932,7 +2115,7 @@ static void *cudaEventLoop(void *arg)
 					cn[0] ? "<== CrsrNew NOT cleared: VBL cursor task not running"
 					      : "(cleared: task ran)");
 			}
-			if (gKeyScript >= 900) gKeyScript = -2;			/* done */
+			if (gKeyScript >= 1500 && !pressedAt) gKeyScript = -2;			/* done */
 			gKeyScript++;
 		}
 		if (gDebugInjectMouseMotion) {
@@ -2096,6 +2279,7 @@ static void *cudaEventLoop(void *arg)
 						head ? "tasks INSTALLED (starved of VBL)"
 						     : "<== EMPTY: no VBL task ever installed");
 				}
+				probe_event_queue();
 				probe_video_driver_failure();
 				pic_debug_print();
 				probe_video_node_interrupts();
