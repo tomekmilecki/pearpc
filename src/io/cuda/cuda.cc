@@ -952,6 +952,49 @@ static void cuda_start_T1()
  * USB symptom that [[pearpc-of-irq-binding-rule]] describes, and would explain
  * why nothing ever installs a VBL handler for the display.
  */
+/*
+ * video.x is MOL's MacOnLinuxVideo driver.  On a failed Initialize it calls
+ * PublishInitFailureMsg, which creates FAILURE / FAIL-CODE properties in the
+ * Name Registry carrying one of its reason strings.  A reason string that
+ * appears only once is just the driver's string table; a second, separate
+ * occurrence means the message was actually published -- i.e. Initialize
+ * really failed, and the driver never got as far as registering its VBL
+ * interrupt service.
+ */
+static void probe_video_driver_failure()
+{
+	static const char *reasons[] = {
+		"No assigned-addresses property", "No AAPL,address property",
+		"No valid address space", "RegistryPropertyGet failed",
+		"Initialize failed", "FAIL-CODE" };
+	const uint32 memSize = ppc_get_memory_size();
+	const uint32 chunk = 4 * 1024 * 1024;
+	byte *buf = new byte[chunk + 64];
+	int count[6] = {0,0,0,0,0,0};
+	for (uint32 base = 0; base < memSize; base += chunk - 64) {
+		uint32 want = (base + chunk <= memSize) ? chunk : (memSize - base);
+		if (!ppc_dma_read(buf, base, want)) continue;
+		for (unsigned k = 0; k < 6; k++) {
+			size_t len = strlen(reasons[k]);
+			for (uint32 i = 0; i + len < want; i++)
+				if (memcmp(buf + i, reasons[k], len) == 0) {
+					/* Report addresses, not just counts: three copies of the
+					 * driver's PEF are resident, so three hits is what the
+					 * string tables alone produce.  Only a hit far from the
+					 * others means the message was really published. */
+					if (count[k] < 6)
+						fprintf(stderr, "[VDRVAT] \"%s\" @ %08x\n",
+							reasons[k], base + i);
+					count[k]++;
+				}
+		}
+	}
+	for (unsigned k = 0; k < 6; k++)
+		fprintf(stderr, "[VDRV] \"%s\" x%d%s\n", reasons[k], count[k],
+			count[k] > 1 ? "   <== PUBLISHED: this failure actually happened" : "");
+	delete[] buf;
+}
+
 static void probe_video_node_interrupts()
 {
 	const uint32 memSize = ppc_get_memory_size();
@@ -2038,6 +2081,7 @@ static void *cudaEventLoop(void *arg)
 						head ? "tasks INSTALLED (starved of VBL)"
 						     : "<== EMPTY: no VBL task ever installed");
 				}
+				probe_video_driver_failure();
 				pic_debug_print();
 				probe_video_node_interrupts();
 				usb_debug_print();
