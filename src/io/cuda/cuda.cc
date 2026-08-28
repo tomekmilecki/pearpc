@@ -978,6 +978,49 @@ static void cuda_start_T1()
  * count and the queue links look sane, and that the linked elements really do
  * land on a regular stride inside the pool, before trusting any of it.
  */
+/*
+ * Find the REAL event queue.
+ *
+ * Writing into the low-memory EventQueue (0x14a) does nothing -- Mac OS never
+ * dequeues from it, with either qType, so it is vestigial on Mac OS 9/PowerPC.
+ * But the keyboard module's PostEvent demonstrably works, so a real queue
+ * exists somewhere.  Find it empirically: an event record is
+ * qLink(4) qType(2) what(2) message(4) when(4) where(4) modifiers(2), so scan
+ * RAM for a plausible one -- qType == 4 (evType) with a sane "what" and a
+ * "when" close to the current Ticks -- and report where it lives.
+ */
+static void scan_for_event_records(const char *tag)
+{
+	uint8 tk[4] = {0,0,0,0};
+	ppc_dma_read(tk, 0x4000 + 0x16a, 4);
+	uint32 now = ((uint32)tk[0]<<24)|((uint32)tk[1]<<16)|((uint32)tk[2]<<8)|tk[3];
+	const uint32 CHUNK = 1u << 20;
+	static uint8 *buf = NULL;
+	if (!buf) buf = (uint8 *)malloc(CHUNK);
+	if (!buf) return;
+	int found = 0;
+	for (uint32 base = 0; base < (128u << 20) && found < 12; base += CHUNK) {
+		if (!ppc_dma_read(buf, base, CHUNK)) continue;
+		for (uint32 i = 0; i + 22 < CHUNK; i += 2) {
+			uint16 qtype = (uint16)((buf[i+4]<<8)|buf[i+5]);
+			if (qtype != 4) continue;			/* evType */
+			uint16 what = (uint16)((buf[i+6]<<8)|buf[i+7]);
+			if (what < 1 || what > 6) continue;
+			uint32 when = ((uint32)buf[i+12]<<24)|((uint32)buf[i+13]<<16)|
+			              ((uint32)buf[i+14]<<8)|buf[i+15];
+			if (when > now || now - when > 600) continue;	/* last ~10s */
+			fprintf(stderr, "[EVSCAN:%s] @%08x what=%d msg=%02x%02x%02x%02x "
+				"when=%u (now=%u) where=(%d,%d)\n", tag, base + i, what,
+				buf[i+8], buf[i+9], buf[i+10], buf[i+11], when, now,
+				(sint16)((buf[i+16]<<8)|buf[i+17]),
+				(sint16)((buf[i+18]<<8)|buf[i+19]));
+			found++;
+			if (found >= 12) break;
+		}
+	}
+	if (!found) fprintf(stderr, "[EVSCAN:%s] no recent event records found\n", tag);
+}
+
 static void probe_event_queue()
 {
 	uint8 b[4], c[2], q[10];
@@ -1770,7 +1813,10 @@ static bool post_os_event(uint16 what, sint16 v, sint16 h, bool buttonDown)
 
 	uint8 e[22];
 	memset(e, 0, sizeof e);
-	e[4] = 0; e[5] = 5;						/* qType = evType */
+	e[4] = 0; e[5] = 4;		/* qType = evType (4).  Was 5 = fsQType, a volume
+				 * control block -- Mac OS would rightly ignore an event
+				 * queue element tagged as one, which is very likely why
+				 * nothing was ever dequeued. */
 	e[6] = (uint8)(what >> 8); e[7] = (uint8)what;			/* evtQWhat */
 	e[12] = tk[0]; e[13] = tk[1]; e[14] = tk[2]; e[15] = tk[3];	/* evtQWhen */
 	e[16] = (uint8)(v >> 8); e[17] = (uint8)v;			/* where.v */
@@ -2165,6 +2211,19 @@ static void *cudaEventLoop(void *arg)
 			 * only keeps the latest button state, coalesced them away -- no
 			 * edge, no event.
 			 */
+			/* Press a key first: its PostEvent works, so the record it
+			 * creates shows where the real queue lives. */
+			static uint64 keyAt = 0;
+			if (gKeyScript == 200 && !keyAt) {
+				keyAt = sys_get_hiresclk_ticks();
+				usb_hid_key_event(0x00, true);		/* ADB 'A' */
+			}
+			if (keyAt && sys_get_hiresclk_ticks() - keyAt >
+			             sys_get_hiresclk_ticks_per_second() / 4) {
+				keyAt = 0;
+				usb_hid_key_event(0x00, false);
+				fprintf(stderr, "[CLICK] key A released\n");
+			}
 			static uint64 pressedAt = 0;
 			if (gKeyScript == 420 && !pressedAt) {
 				pressedAt = sys_get_hiresclk_ticks();
