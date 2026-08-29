@@ -1934,6 +1934,7 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 
 /* Runs on the CPU thread, from the VIA register path. */
 extern "C" void jitc_flush_all_now();
+extern "C" void pearpc_inject_mouse(int dx, int dy, int buttonState);
 
 static void cuda_shim_apply()
 {
@@ -2423,42 +2424,21 @@ static void *cudaEventLoop(void *arg)
 			 * ran on the Multiple Users login screen, which may not run a
 			 * normal cursor environment; this gets to the desktop first.
 			 */
-			if (gKeyScript < 600 && (gKeyScript % 4) == 0) {
-				/* Drive toward the login window's "Log in" button, then
-				 * click it: if MBState alone is enough, the UI reacts and no
-				 * event posting is needed; if not, the Event Manager must be
-				 * fed directly. */
-				usb_hid_mouse_event(11, 8, false, false, false);
-				cuda_shim_mouse(11, 8, false);
-				/*
-				 * Also drive the ADB/CUDA mouse path.  The previous "restore
-				 * the ADB nodes" test injected only over USB, so it never
-				 * exercised ADB at all and said nothing about it.  This is the
-				 * same call the key script uses; cudaEventLoop has already
-				 * released gCUDAMutex here, so it is safe from this thread
-				 * (unlike cudaEventHandler, which would deadlock on
-				 * gCUDAEventSem).
-				 */
-				SystemEvent mev = {};
-				mev.type = sysevMouse;
-				mev.mouse.type = sme_motionNotify;
-				mev.mouse.relx = 6;
-				mev.mouse.rely = 4;
-				tryProcessCudaEvent(mev);
-			}
-			if (gKeyScript == 400) {
-				/* Park the pointer exactly on the "IGA" row of the login
-				 * list, so the click test does not depend on how many
-				 * relative steps happened to be applied. */
-				/* Park on the "parzej" row, not IGA: the Down-arrow probe in
-				 * this same script selects IGA, so a click there would be
-				 * indistinguishable from the keystroke. */
-				sint16 tv = 237, th = 337;
-				uint8 pt[4] = { (uint8)(tv>>8), (uint8)tv,
-				                (uint8)(th>>8), (uint8)th };
-				ppc_dma_write(LOMEM_BASE + 0x82c, pt, 4);	/* RawMouse */
-				ppc_dma_write(LOMEM_BASE + 0x830, pt, 4);	/* Mouse    */
-				fprintf(stderr, "[CLICK] parked at (h=%d,v=%d)\n", th, tv);
+			/*
+			 * Deterministic aiming.  Parking the low-memory Mouse global is
+			 * useless -- Mac OS keeps its own cursor position and clicks land
+			 * there -- so drive the pointer the way a hand does: shove it into
+			 * the bottom-right corner until it pins, then walk back by a known
+			 * offset.  Slow steps keep the guest's acceleration curve at 1:1.
+			 */
+			if (gKeyScript < 400 && (gKeyScript % 4) == 0)
+				pearpc_inject_mouse(40, 40, -1);	/* home into the corner */
+			if (gKeyScript >= 400 && gKeyScript < 600 && (gKeyScript % 4) == 0)
+				pearpc_inject_mouse(-7, -5, -1);	/* 50 steps -> (289,229) */
+			if (gKeyScript == 700) {
+				gcard_dump_framebuffer();
+				rename("/tmp/pearpc-fb.ppm", "/tmp/pearpc-fb-aim.ppm");
+				fprintf(stderr, "[AIM] cursor homed+walked -> /tmp/pearpc-fb-aim.ppm\n");
 			}
 			/*
 			 * Hold the button in WALL-CLOCK time, not loop iterations: this
@@ -2483,7 +2463,7 @@ static void *cudaEventLoop(void *arg)
 			 * the SDL->ADB table fix. */
 			static uint64 downAt = 0;
 			static int downState = 0;
-			if (gKeyScript == 100 && !downState) {
+			if (0 && !downState) {
 				downState = 1; downAt = sys_get_hiresclk_ticks();
 				usb_hid_key_event(0x7d, true);
 				fprintf(stderr, "[ARROW] Down pressed (ADB 0x7d)\n");
@@ -2495,10 +2475,9 @@ static void *cudaEventLoop(void *arg)
 				fprintf(stderr, "[ARROW] Down released\n");
 			}
 			static uint64 pressedAt = 0;
-			if (gKeyScript == 420 && !pressedAt) {
+			if (gKeyScript == 800 && !pressedAt) {
 				pressedAt = sys_get_hiresclk_ticks();
-				usb_hid_mouse_event(0, 0, true, false, false);
-				cuda_shim_mouse(0, 0, true);
+				pearpc_inject_mouse(0, 0, 1);	/* real SDL path */
 				fprintf(stderr, "[CLICK] button DOWN\n");
 			}
 			/*
@@ -2526,8 +2505,7 @@ static void *cudaEventLoop(void *arg)
 			 * keystrokes -- which is why the provocation could inject keys the
 			 * driver never posted. */
 					pressedAt = 0;
-					usb_hid_mouse_event(0, 0, false, false, false);
-					cuda_shim_mouse(0, 0, false);
+					pearpc_inject_mouse(0, 0, 0);	/* real SDL path */
 					fprintf(stderr, "[CLICK] button UP (held 250ms)\n");
 				} else {
 					/* keep re-asserting so an apply cannot miss the down */
@@ -2535,6 +2513,11 @@ static void *cudaEventLoop(void *arg)
 				}
 			}
 
+			if (gKeyScript == 1200) {
+				gcard_dump_framebuffer();
+				rename("/tmp/pearpc-fb.ppm", "/tmp/pearpc-fb-final.ppm");
+				fprintf(stderr, "[FINAL] after click -> /tmp/pearpc-fb-final.ppm\n");
+			}
 			if (gKeyScript == 500) {
 				/*
 				 * Does the VBL cursor task run at all?  On Mac OS 9 input sets

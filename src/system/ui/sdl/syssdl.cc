@@ -69,6 +69,46 @@ static uint8 scancode_to_adb_key[256] = {
 	0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
 };
 
+/*
+ * Push synthetic SDL input so it travels the SAME path as the trackpad:
+ * handleSDLEvent -> gMouse->handleEvent -> cudaEventHandler.  Every earlier
+ * click test called usb_hid_mouse_event() directly and so skipped this code
+ * entirely -- which is exactly how the button-state bug here stayed hidden
+ * while the guest was searched for months of runs.
+ */
+extern "C" void pearpc_inject_mouse(int dx, int dy, int buttonState)
+{
+	/*
+	 * setMouseGrab() updates the window title, and AppKit aborts the process
+	 * if that happens off the main thread.  Ask for the grab through the event
+	 * queue instead, so it runs on the SDL thread ahead of the events below.
+	 */
+	{
+		SDL_Event g;
+		SDL_zero(g);
+		g.type = SDL_EVENT_USER;
+		g.user.code = 2;
+		SDL_PushEvent(&g);
+	}
+	if (dx || dy) {
+		SDL_Event e;
+		SDL_zero(e);
+		e.type = SDL_EVENT_MOUSE_MOTION;
+		e.motion.xrel = (float)dx;
+		e.motion.yrel = (float)dy;
+		SDL_PushEvent(&e);
+	}
+	if (buttonState >= 0) {
+		SDL_Event e;
+		SDL_zero(e);
+		e.type = buttonState ? SDL_EVENT_MOUSE_BUTTON_DOWN
+		                     : SDL_EVENT_MOUSE_BUTTON_UP;
+		e.button.button = SDL_BUTTON_LEFT;
+		e.button.down = buttonState ? true : false;
+		SDL_PushEvent(&e);
+	}
+}
+
 static bool handleSDLEvent(const SDL_Event &event)
 {
 	static bool mouseButton[3] = {false, false, false};
@@ -80,6 +120,10 @@ static bool handleSDLEvent(const SDL_Event &event)
 		if (event.user.code == 1) {  // helper for changeResolution
 			sd->mChangeResRet = sd->changeResolutionREAL(sd->mSDLChartemp);
 			SDL_SignalCondition(sd->mWaitcondition);
+		}
+		if (event.user.code == 2) {  // grab request from pearpc_inject_mouse
+			if (gDisplay && !gDisplay->isMouseGrabbed())
+				gDisplay->setMouseGrab(true);
 		}
 		return true;
 	}
