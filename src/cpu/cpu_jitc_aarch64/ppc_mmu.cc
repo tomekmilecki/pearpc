@@ -2296,6 +2296,25 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  * point -- which is what a host->guest call needs.
  */
 /* Set by the input path when a click needs posting: 1 = mouseDown, 2 = mouseUp. */
+/*
+ * Pending mouse events, as a small FIFO rather than a single slot.  A click is
+ * two edges ~125ms apart, and one slot means the mouseUp overwrites a
+ * mouseDown that has not been consumed yet -- the UI then sees half a click,
+ * or nothing.  Written by the input thread at the button edge, drained here.
+ */
+#define MEVQ 8
+volatile int gMouseEvQ[MEVQ];
+volatile int gMouseEvHead = 0, gMouseEvTail = 0;
+
+static int mouse_ev_peek(void)
+{
+    return (gMouseEvHead == gMouseEvTail) ? 0 : gMouseEvQ[gMouseEvHead];
+}
+static void mouse_ev_pop(void)
+{
+    if (gMouseEvHead != gMouseEvTail) gMouseEvHead = (gMouseEvHead + 1) % MEVQ;
+}
+
 volatile int gPendingMouseEvent = 0;
 volatile int gClickArmed = 0;
 volatile int gJitFlushRequest = 0;
@@ -2417,9 +2436,9 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
         fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
     }
 
-    int want = gPendingMouseEvent;
+    int want = mouse_ev_peek();
     if (want && (aCPU.gpr[3] == 3 || aCPU.gpr[3] == 4)) {
-        gPendingMouseEvent = 0;
+        mouse_ev_pop();
         uint32 wasKey = aCPU.gpr[3];
         aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
         aCPU.gpr[4] = 0;			/* message unused for mouse */

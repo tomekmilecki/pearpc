@@ -1899,7 +1899,16 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 		 * which is both useless and a stability risk. */
 		static const int armOn = getenv("PEARPC_CLICK_HIJACK") ? 1 : 0;
 		if (armOn) {
-			gPendingMouseEvent = b ? 1 : 2;	/* mouseDown : mouseUp */
+			/* Queue the edge: a click is two edges and a single slot loses
+			 * one of them. */
+			extern volatile int gMouseEvQ[];
+			extern volatile int gMouseEvHead, gMouseEvTail;
+			int nxt = (gMouseEvTail + 1) % 8;
+			if (nxt != gMouseEvHead) {
+				gMouseEvQ[gMouseEvTail] = b ? 1 : 2;
+				gMouseEvTail = nxt;
+			}
+			gPendingMouseEvent = b ? 1 : 2;	/* keeps provocation running */
 			if (!gClickArmed) { gClickArmed = 1; gJitFlushRequest = 1; }
 		}
 		{
@@ -2277,7 +2286,8 @@ static void *cudaEventLoop(void *arg)
 			static int provDown = 0;
 			static uint8 provKey = 0;
 			uint64 per = sys_get_hiresclk_ticks_per_second();
-			if (gPendingMouseEvent) {
+			extern volatile int gMouseEvHead, gMouseEvTail;
+			if (gMouseEvHead != gMouseEvTail) {
 				if (!provDown && sys_get_hiresclk_ticks() - provAt > per / 8) {
 					static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
 					static unsigned pi = 0;
@@ -2297,6 +2307,7 @@ static void *cudaEventLoop(void *arg)
 				provDown = 0;
 				usb_hid_key_event(provKey, false);
 			}
+			if (gMouseEvHead == gMouseEvTail) gPendingMouseEvent = 0;
 		}
 		if (gKeyScript >= 0) {
 			/* Realistic pointer motion: ~50 small reports at the 8ms poll
