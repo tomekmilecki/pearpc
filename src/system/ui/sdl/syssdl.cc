@@ -107,6 +107,19 @@ static bool handleSDLEvent(const SDL_Event &event)
 		return true;
 	}
 	case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		/*
+		 * Click to grab.  Until the mouse is grabbed the host cursor stays
+		 * visible on top of the guest's own pointer -- two arrows, confusingly
+		 * -- and SDL only reports motion while the pointer happens to be over
+		 * the window, so tracking works, stops, and the pointer strands.  The
+		 * documented F12 toggle is unusable on a Mac laptop, where the OS eats
+		 * it as volume-up.  Swallow this first click: it grabs, it is not
+		 * meant for the guest.
+		 */
+		if (!gDisplay->isMouseGrabbed()) {
+			gDisplay->setMouseGrab(true);
+			return true;
+		}
 		ev.type = sysevMouse;
 		ev.mouse.type = sme_buttonPressed;
 		memcpy(tmpMouseButton, mouseButton, sizeof (tmpMouseButton));
