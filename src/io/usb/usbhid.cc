@@ -19,6 +19,7 @@
  */
 
 #include <stdio.h>
+#include <cstdlib>
 #include "usbhid.h"
 
 #include <cstring>
@@ -329,6 +330,21 @@ int usbhid_control(USBHIDDevice &d, const uint8 *setup, uint8 *data, int maxlen)
 		return 0;
 	case REQ_SET_CONFIGURATION:
 		d.config = wValue & 0xff;
+		if (!d.isKeyboard && d.config && getenv("PEARPC_CDM_HUNT")) {
+			/*
+			 * The mouse driver initialises right after this, and that is when
+			 * it calls CursorDeviceNewDevice.  Open the glue trap for a short
+			 * window here: leaving it on for a whole boot interprets every
+			 * `lwz r12,d(rA)` and the guest never reaches the login screen.
+			 */
+			extern volatile int gClickArmed;
+			extern volatile int gJitFlushRequest;
+			extern volatile int gCdmHuntUntil;
+			gCdmHuntUntil = 1;
+			gClickArmed = 1;
+			gJitFlushRequest = 1;
+			fprintf(stderr, "[CDM] mouse configured -- glue trap open\n");
+		}
 		return 0;
 	case REQ_GET_CONFIGURATION:
 		if (want < 1) return 0;

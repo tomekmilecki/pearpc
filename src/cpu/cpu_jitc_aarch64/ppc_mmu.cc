@@ -2318,6 +2318,8 @@ static void mouse_ev_pop(void)
 volatile int gPendingMouseEvent = 0;
 volatile int gClickArmed = 0;
 volatile int gJitFlushRequest = 0;
+volatile int gCdmHuntUntil = 0;
+volatile uint32 gCursorDeviceRec = 0;
 
 /* Flush every translation so a change to gClickArmed takes effect.  Must run
  * on the CPU thread.  Wrapped in C linkage because cuda.cc cannot see JITC. */
@@ -2433,6 +2435,38 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
         if (n < 12) { n++;
             fprintf(stderr, "[PEGLUE] PostEvent glue hit: r3=%u rA=r%u disp=%d pending=%d\n",
                     aCPU.gpr[3], rA, (int)disp, gPendingMouseEvent); }
+    }
+    if (gCdmHuntUntil) {
+        /* Log each distinct target the mouse driver calls while initialising.
+         * CursorDeviceNewDevice takes a pointer to where the device record
+         * lands, so capturing r3 at that call gives a handle on the CDM's own
+         * cursor state -- which is what Mac OS hit-tests clicks against. */
+        static uint32 seen[64]; static int nseen = 0;
+        uint32 e2 = 0;
+        if (!ppc_read_effective_word(aCPU, tvec, e2) && e2) {
+            bool known = false;
+            for (int i = 0; i < nseen; i++) if (seen[i] == e2) { known = true; break; }
+            if (!known && nseen < 64) {
+                seen[nseen++] = e2;
+                fprintf(stderr, "[CDM] glue target %08x  r3=%08x r4=%08x\n",
+                        e2, aCPU.gpr[3], aCPU.gpr[4]);
+            }
+            /*
+             * The CursorDeviceManager entry points cluster in ROM around
+             * 0xffde0000-0xffde2fff and are called with the same pointer in r3
+             * every time -- that is the cursor device record.  Remember it: its
+             * position field is what Mac OS hit-tests clicks against, and
+             * writing that is what would make its cursor follow ours.
+             */
+            if (e2 >= 0xffdd0000u && e2 < 0xffdf0000u &&
+                aCPU.gpr[3] > 0x1000u && aCPU.gpr[3] < 0x08000000u) {
+                if (gCursorDeviceRec != aCPU.gpr[3]) {
+                    gCursorDeviceRec = aCPU.gpr[3];
+                    fprintf(stderr, "[CDM] cursor device record = %08x (via %08x)\n",
+                            gCursorDeviceRec, e2);
+                }
+            }
+        }
     }
     if (!gPendingMouseEvent) return 0;
     if (entry != 0xffd095ecU) return 0;		/* not PostEvent */

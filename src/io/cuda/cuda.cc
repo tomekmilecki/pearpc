@@ -1953,6 +1953,21 @@ static void cuda_shim_apply()
 		 * on arming, so the trap appears, and on disarming, so the cost goes
 		 * away again.  One flush per click edge is affordable.
 		 */
+		/* Close the CDM hunt window: the driver initialises within a few
+		 * seconds of being configured, and leaving the glue trap open past
+		 * that stops the guest ever reaching the login screen. */
+		extern volatile int gCdmHuntUntil;
+		if (gCdmHuntUntil) {
+			static uint64 huntStart = 0;
+			if (!huntStart) huntStart = sys_get_hiresclk_ticks();
+			if (sys_get_hiresclk_ticks() - huntStart >
+			    sys_get_hiresclk_ticks_per_second() * 12) {
+				gCdmHuntUntil = 0;
+				gClickArmed = 0;
+				gJitFlushRequest = 1;
+				fprintf(stderr, "[CDM] hunt window closed\n");
+			}
+		}
 		if (gPendingMouseEvent && !gClickArmed) {
 			gClickArmed = 1;
 			gJitFlushRequest = 1;
@@ -1963,6 +1978,36 @@ static void cuda_shim_apply()
 		if (gJitFlushRequest) {
 			gJitFlushRequest = 0;
 			jitc_flush_all_now();
+		}
+	}
+
+	/*
+	 * Dump the cursor device record periodically.  Comparing successive dumps
+	 * while the pointer is being driven shows which field is the position --
+	 * that is the value Mac OS hit-tests clicks against, and the thing that
+	 * has to follow our motion.
+	 */
+	{
+		extern volatile uint32 gCursorDeviceRec;
+		static uint64 lastDump = 0;
+		static int dumps = 0;
+		if (gCursorDeviceRec && dumps < 6) {
+			uint64 now = sys_get_hiresclk_ticks();
+			if (now - lastDump > sys_get_hiresclk_ticks_per_second() * 2) {
+				lastDump = now;
+				dumps++;
+				uint8 rec[48];
+				if (ppc_dma_read(rec, gCursorDeviceRec, sizeof rec)) {
+					uint8 mo[4] = {0,0,0,0};
+					ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4);
+					fprintf(stderr, "[CDMREC] #%d Mouse=(%d,%d) @%08x:",
+						dumps,
+						(sint16)((mo[0]<<8)|mo[1]), (sint16)((mo[2]<<8)|mo[3]),
+						gCursorDeviceRec);
+					for (int i = 0; i < 48; i++) fprintf(stderr, " %02x", rec[i]);
+					fprintf(stderr, "\n");
+				}
+			}
 		}
 	}
 
@@ -2624,6 +2669,20 @@ static void *cudaEventLoop(void *arg)
 						     : "<== EMPTY: no VBL task ever installed");
 				}
 				scan_for_event_records("probe");
+				{
+					extern volatile uint32 gCursorDeviceRec;
+					if (gCursorDeviceRec) {
+						uint8 rec[64];
+						if (ppc_dma_read(rec, gCursorDeviceRec, sizeof rec)) {
+							fprintf(stderr, "[CDMREC] @%08x:", gCursorDeviceRec);
+							for (int i = 0; i < 64; i++) {
+								if ((i % 16) == 0) fprintf(stderr, "\n  +%02x:", i);
+								fprintf(stderr, " %02x", rec[i]);
+							}
+							fprintf(stderr, "\n");
+						}
+					}
+				}
 				probe_event_queue();
 				probe_video_driver_failure();
 				pic_debug_print();
