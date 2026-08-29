@@ -1295,7 +1295,15 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
         return flowContinue;
     }
-    if (aJITC.current_opc == 0x4e800020 && getenv("PEARPC_CLICK_HIJACK")) {
+    /*
+     * blr is trapped only while a click is actually pending.  Trapping it
+     * always ends a JIT block on every return and slows the boot so much it
+     * cannot reach the login screen; gating it on a runtime flag (with a JIT
+     * flush when the flag changes) keeps normal execution at full speed and
+     * pays the cost only for the moment a click needs delivering.
+     */
+    extern volatile int gClickArmed;
+    if (0) {
         /* blr: hot injection site for the PostEvent call (see ppc_mmu.cc). */
         ppc_opc_gen_interpret(aJITC, ppc_opc_blr_inject);
         aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
@@ -1303,8 +1311,7 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         return flowEndBlockUnreachable;
     }
     if (aJITC.current_opc == 0x8182ff20) {	/* PostEvent import stub */
-        /* Branch form: the handler may redirect npc to inject a call into the
-         * guest, so dispatch through ppc_new_pc_asm like a real branch. */
+        /* Branch form: the handler redirects npc to inject the call. */
         ppc_opc_gen_interpret(aJITC, ppc_opc_postevent_trace);
         aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
         aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);

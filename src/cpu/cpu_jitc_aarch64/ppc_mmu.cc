@@ -2297,11 +2297,22 @@ extern "C" { extern int gHIDTraceArmed; extern uint32 gHIDReportBuf; extern int 
  */
 /* Set by the input path when a click needs posting: 1 = mouseDown, 2 = mouseUp. */
 volatile int gPendingMouseEvent = 0;
+volatile int gClickArmed = 0;
+volatile int gJitFlushRequest = 0;
+
+/* Flush every translation so a change to gClickArmed takes effect.  Must run
+ * on the CPU thread.  Wrapped in C linkage because cuda.cc cannot see JITC. */
+extern "C" void jitc_flush_all_now()
+{
+    extern JITC *gJITC;
+    if (gJITC) gJITC->invalidateAll();
+}
 
 /* PostEvent, captured the first time a call to it is observed. */
 static uint32 gPEEntry = 0, gPEToc = 0;
 
 /* Saved guest state across an injected call. */
+static int gCallWhat = 0;
 static struct {
     int      active;
     uint32   gpr[13];		/* r0..r12: volatile, plus r2 */
@@ -2322,17 +2333,37 @@ extern "C" int ppc_opc_blr_inject(PPC_CPU_State &aCPU)
 
     if (gCall.active) {				/* PostEvent has returned here */
         gCall.active = 0;
+        uint32 res = aCPU.gpr[3];		/* OSErr, before we restore */
         for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
         aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
         aCPU.npc = gCall.npc;			/* the blr's original target */
+        if (res != 0) {
+            /* Rejected: this blr was not a valid context to call the Event
+             * Manager from.  Re-arm so the next suitable site retries --
+             * dropping it here is what made clicks land only sometimes. */
+            gPendingMouseEvent = gCallWhat;
+        }
         static int n = 0;
-        if (n < 20) { n++; fprintf(stderr, "[CALL] returned; resuming at %08x\n", gCall.npc); }
+        if (n < 20) { n++;
+            fprintf(stderr, "[CALL] returned OSErr=%d (%s); resuming at %08x\n",
+                    (int)(sint32)res,
+                    res == 0 ? "noErr -- event accepted" : "rejected, will retry",
+                    gCall.npc); }
         return 0;
     }
 
     int want = gPendingMouseEvent;
-    if (want && gPEEntry) {
+    /*
+     * Only inject where calling the Event Manager is safe: interrupts enabled
+     * and translation on.  At an arbitrary blr the machine may be inside an
+     * interrupt handler or running untranslated, and PostEvent then returns
+     * garbage rather than an OSErr -- which is exactly what the rejected
+     * calls looked like.
+     */
+    const uint32 needMSR = 0x8000u | 0x20u | 0x10u;	/* EE | IR | DR */
+    if (want && gPEEntry && (aCPU.msr & needMSR) == needMSR) {
         gPendingMouseEvent = 0;
+        gCallWhat = want;
         for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
         gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
         gCall.npc = target;			/* where the blr would have gone */
@@ -2355,40 +2386,32 @@ extern "C" int ppc_opc_blr_inject(PPC_CPU_State &aCPU)
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
-     * Host->guest call of PostEvent, so a click can be posted without the
-     * CursorDeviceManager or VBL.  PostEvent fills the event's "where" from
-     * the low-memory Mouse global, which the cursor shim keeps correct, so the
-     * click lands under the visible pointer.
+     * Inject the PostEvent call HERE, at the keyboard module's CFM import
+     * stub -- a real call site with a valid frame.  Arbitrary blr sites do not
+     * work: the call returns garbage instead of an OSErr, because the machine
+     * may be anywhere (ROM, an interrupt handler).  At this stub the call
+     * returns noErr and Mac OS acts on the event.
      *
-     * This trap sits on the CFM import stub `lwz r12,-224(r2)`.  That encoding
-     * is not unique -- other modules' glue shares it -- so PostEvent is
-     * recognised by its resolved target: TVector -> ROM entry 0xffd095ec.
-     *
-     * The call is made by redirecting execution rather than re-entering the
-     * CPU: save the volatile state, point lr back at THIS instruction so
-     * PostEvent returns into this handler, and set npc to the entry.  On
-     * re-entry the state is restored and the guest's own instruction proceeds
-     * as if nothing happened.  Dispatched as a branch, so npc takes effect.
+     * The stub is recognised by its resolved target (TVector -> ROM entry
+     * 0xffd095ec); the encoding alone is shared with other modules' glue.
      */
     uint32 ea = aCPU.gpr[2] - 224;
     uint32 tvec = 0;
     int r = ppc_read_effective_word(aCPU, ea, tvec);
     if (r) return r;
 
-    if (gCall.active) {				/* PostEvent has returned */
+    if (gCall.active) {				/* PostEvent returned here */
         gCall.active = 0;
+        uint32 res = aCPU.gpr[3];
         for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
-        /*
-         * Suppress the call we borrowed.  A synthetic keystroke is what forced
-         * the guest to reach this stub, and letting its own PostEvent proceed
-         * would type a character on every click.  Posting nullEvent(0) instead
-         * keeps the guest's control flow intact while discarding the event.
-         */
-        aCPU.gpr[3] = 0;
         aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
-        aCPU.npc = gCall.npc;			/* resume the guest's own flow */
+        aCPU.npc = gCall.npc;
+        aCPU.gpr[3] = 0;			/* neuter the borrowed call */
+        if (res != 0) gPendingMouseEvent = gCallWhat;	/* rejected: retry */
         static int n = 0;
-        if (n < 40) { n++; fprintf(stderr, "[CALL] PostEvent returned, state restored\n"); }
+        if (n < 20) { n++;
+            fprintf(stderr, "[CALL] returned OSErr=%d (%s)\n", (int)(sint32)res,
+                    res == 0 ? "noErr -- accepted" : "rejected, will retry"); }
         return 0;
     }
 
@@ -2396,27 +2419,28 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 
     uint32 entry = 0;
     ppc_read_effective_word(aCPU, tvec, entry);
-    if (entry == 0xffd095ecU && !gPEEntry) {
+    if (entry != 0xffd095ecU) return 0;		/* not PostEvent's stub */
+    if (!gPEEntry) {
         gPEEntry = entry;
         ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
         fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
     }
 
     int want = gPendingMouseEvent;
-    if (want && gPEEntry) {
+    if (want) {
         gPendingMouseEvent = 0;
+        gCallWhat = want;
         for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
         gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
         gCall.npc = aCPU.npc;			/* = pc + 4 */
         gCall.active = 1;
-        aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
+        aCPU.gpr[3] = (uint32)want;
         aCPU.gpr[4] = 0;
         aCPU.gpr[2] = gPEToc;
-        aCPU.lr  = aCPU.pc;			/* return into this handler */
+        aCPU.lr  = aCPU.pc;
         aCPU.npc = gPEEntry;
         static int n = 0;
-        if (n < 40) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at pc=%08x mouse=?\n",
-                                  want, aCPU.pc); }
+        if (n < 20) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at stub\n", want); }
     }
     return 0;
 }

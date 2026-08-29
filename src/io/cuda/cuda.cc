@@ -1882,6 +1882,27 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 	int b = button ? 1 : 0;
 	if (gCudaShimEnabled && prevB != b) {
 		prevB = b;
+		/*
+		 * Arm the click HERE, at the edge, not in cuda_shim_apply.  Detecting
+		 * it there meant comparing gShimButton whenever a cuda_read happened
+		 * to occur, and the transition was repeatedly missed -- the ring
+		 * dropped the mouseUp, and state comparison armed nothing at all.  At
+		 * the edge the transition is known for certain.  The blr injection
+		 * site delivers within microseconds, so a pending event is cleared
+		 * long before the next edge can overwrite it.
+		 */
+		extern volatile int gPendingMouseEvent;
+		extern volatile int gClickArmed;
+		extern volatile int gJitFlushRequest;
+		gPendingMouseEvent = b ? 1 : 2;		/* mouseDown : mouseUp */
+		if (!gClickArmed) { gClickArmed = 1; gJitFlushRequest = 1; }
+		{
+			static int n = 0;
+			if (n < 20) {
+				n++;
+				fprintf(stderr, "[EDGE] armed mouse event %d\n", gPendingMouseEvent);
+			}
+		}
 		/* Record the edge only.  Posting it here would run on the input
 		 * thread and race the guest on its own event queue; the CPU thread
 		 * drains this in cuda_shim_apply().  A queue rather than a flag,
@@ -1895,9 +1916,30 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 }
 
 /* Runs on the CPU thread, from the VIA register path. */
+extern "C" void jitc_flush_all_now();
+
 static void cuda_shim_apply()
 {
 	if (!gCudaShimEnabled) return;
+
+	/*
+	 * Arm/disarm the blr trap on the CPU thread, where flushing the JIT is
+	 * safe.  Translations are cached, so the flag only takes effect after an
+	 * invalidateAll().
+	 */
+	{
+		extern volatile int gPendingMouseEvent;
+		extern volatile int gClickArmed;
+		extern volatile int gJitFlushRequest;
+		if (gClickArmed && !gPendingMouseEvent) {
+			gClickArmed = 0;		/* delivered: back to full speed */
+			gJitFlushRequest = 1;
+		}
+		if (gJitFlushRequest) {
+			gJitFlushRequest = 0;
+			jitc_flush_all_now();
+		}
+	}
 
 	if (gShimPending) {
 		int dx = gShimDx, dy = gShimDy;
@@ -1971,19 +2013,8 @@ static void cuda_shim_apply()
 	 * whatever the button ends up doing, the next drain notices the
 	 * difference and posts it.
 	 */
-	if (hijackOn && !gPendingMouseEvent) {
-		int cur = gShimButton ? 1 : 0;
-		if (cur != gLastPostedButton) {
-			gLastPostedButton = cur;
-			gPendingMouseEvent = cur ? 1 : 2;	/* mouseDown : mouseUp */
-			static int n = 0;
-			if (n < 20) {
-				n++;
-				fprintf(stderr, "[DRAIN2] armed mouse event %d (button now %d)\n",
-					gPendingMouseEvent, cur);
-			}
-		}
-	}
+	/* (click arming moved to cuda_shim_mouse, at the edge itself) */
+
 
 	/*
 	 * Release the synthetic key on a timer, not on the hijack completing:
