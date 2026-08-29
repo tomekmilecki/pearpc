@@ -1324,10 +1324,29 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
      * the call from there -- every one returned garbage instead of an OSErr.
      * The keyboard driver's own context is the one that returns noErr.
      */
-    if (aJITC.current_opc == 0x8182ff20) {
-        /* Plain interpret: the handler only rewrites registers now, it does
-         * not redirect execution, so the block need not end here. */
-        ppc_opc_gen_interpret(aJITC, ppc_opc_postevent_trace);
+    /*
+     * Any CFM import glue (lwz r12,d(r2)), not one displacement: the handler
+     * resolves the target and acts only on PostEvent's.  Gated on gClickArmed
+     * so the default build never pays for it -- dispatching this as a branch
+     * ends a JIT block, and the encoding is common.
+     */
+    /*
+     * Any `lwz r12,d(rA)` -- CFM glue loading a TVector.  The handler resolves
+     * the target and only acts on PostEvent's, where it rewrites r3/r4 to turn
+     * a keystroke the driver is posting into a mouse click.
+     *
+     * Dispatched as a load/store, NOT a branch: the swap only changes register
+     * values and lets the instruction proceed, so there is no need to end the
+     * JIT block.  That is cheap enough to leave always on -- which it must be,
+     * because gating it on a runtime flag was inert (translations are cached,
+     * and the JIT flush that would have made the flag take effect was removed
+     * for being destructive).  Left behind PEARPC_CLICK_HIJACK so the default
+     * build is untouched; getenv runs once per translation.
+     */
+    extern volatile int gClickArmed;
+    if ((aJITC.current_opc >> 26) == 32 && ((aJITC.current_opc >> 21) & 31) == 12
+        && gClickArmed) {
+        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_postevent_trace);
         return flowContinue;
     }
     if (aJITC.current_opc == 0x387d0002) {

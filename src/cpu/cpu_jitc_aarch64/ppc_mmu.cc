@@ -2407,45 +2407,45 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
     /*
      * Turn a keystroke the driver is already posting into a mouse click.
      *
-     * Calling PostEvent ourselves does not work: it is accepted only from the
-     * keyboard driver's own task context, and no injection site or provocation
-     * reliably puts the machine there.  But the driver reaches this stub FROM
-     * that context on every keystroke -- so rather than make the call, change
-     * the arguments of the one it is already making.  The key is never typed;
-     * a mouse event is posted in its place, from a context PostEvent accepts.
-     *
-     * The stub is `lwz r12,-224(r2)`, an encoding shared with other modules'
-     * glue, so it is recognised by its resolved target: TVector -> ROM entry
-     * 0xffd095ec.  Only a genuine key event (r3 = 3 keyDown, 4 keyUp) is
-     * displaced, and only while a click is pending -- the provocation
-     * keystroke exists precisely to be displaced.
+     * Calling PostEvent ourselves only works from the keyboard driver's own
+     * task context, which cannot be entered on demand.  But the driver reaches
+     * this glue FROM that context whenever it posts a key event -- so change
+     * the arguments of the call it is already making.  The provocation
+     * keystroke exists to be displaced, so nothing is typed, and PostEvent
+     * fills the event's "where" from the low-memory Mouse global, which the
+     * cursor shim keeps under the visible pointer.
      */
-    uint32 ea = aCPU.gpr[2] - 224;
+    sint16 disp = (sint16)(aCPU.current_opc & 0xffff);
+    uint32 rA   = (aCPU.current_opc >> 16) & 31;
+    uint32 ea   = (rA ? aCPU.gpr[rA] : 0) + (sint32)disp;
     uint32 tvec = 0;
     int r = ppc_read_effective_word(aCPU, ea, tvec);
     if (r) return r;
     aCPU.gpr[12] = tvec;			/* the instruction's own effect */
 
     uint32 entry = 0;
-    ppc_read_effective_word(aCPU, tvec, entry);
-    if (entry != 0xffd095ecU) return 0;		/* not PostEvent */
-
-    if (!gPEEntry) {
-        gPEEntry = entry;
-        ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
-        fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
+    if (ppc_read_effective_word(aCPU, tvec, entry)) return 0;
+    if (entry == 0xffd095ecU) {
+        /* Does the guest resolve ANY glue to PostEvent, and with what?
+         * Zero swaps could mean the driver never uses CFM glue for it, or
+         * that it does but never with a key event while a click is pending. */
+        static int n = 0;
+        if (n < 12) { n++;
+            fprintf(stderr, "[PEGLUE] PostEvent glue hit: r3=%u rA=r%u disp=%d pending=%d\n",
+                    aCPU.gpr[3], rA, (int)disp, gPendingMouseEvent); }
     }
+    if (!gPendingMouseEvent) return 0;
+    if (entry != 0xffd095ecU) return 0;		/* not PostEvent */
+    if (aCPU.gpr[3] != 3 && aCPU.gpr[3] != 4) return 0;	/* only a key event */
 
-    int want = mouse_ev_peek();
-    if (want && (aCPU.gpr[3] == 3 || aCPU.gpr[3] == 4)) {
-        mouse_ev_pop();
-        uint32 wasKey = aCPU.gpr[3];
-        aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
-        aCPU.gpr[4] = 0;			/* message unused for mouse */
+    int want = gPendingMouseEvent;
+    gPendingMouseEvent = 0;
+    aCPU.gpr[3] = (uint32)want;			/* mouseDown = 1, mouseUp = 2 */
+    aCPU.gpr[4] = 0;
+    {
         static int n = 0;
         if (n < 20) { n++;
-            fprintf(stderr, "[SWAP] key event %u -> mouse event %d (posted from the "
-                    "driver's own context)\n", wasKey, want); }
+            fprintf(stderr, "[SWAP] keystroke -> mouse event %d\n", want); }
     }
     return 0;
 }

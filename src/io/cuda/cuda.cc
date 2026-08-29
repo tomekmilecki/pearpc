@@ -1946,13 +1946,24 @@ static void cuda_shim_apply()
 		extern volatile int gClickArmed;
 		extern volatile int gJitFlushRequest;
 		/*
-		 * No JIT flush.  It existed only to make the blr trap appear/disappear,
-		 * and that trap is gone -- but the flush stayed, throwing away every
-		 * translation at exactly the moment the guest needs to be responsive
-		 * enough to process the provocation keystroke.  That is very likely why
-		 * the keys went in and the driver posted nothing.
+		 * The glue trap must be gated -- `lwz r12,d(rA)` is far too common to
+		 * interpret unconditionally, and doing so stops the guest reaching the
+		 * login screen at all.  Gating only works if translations are
+		 * discarded when the flag changes, so flush once on each transition:
+		 * on arming, so the trap appears, and on disarming, so the cost goes
+		 * away again.  One flush per click edge is affordable.
 		 */
-		(void)gClickArmed; (void)gJitFlushRequest;
+		if (gPendingMouseEvent && !gClickArmed) {
+			gClickArmed = 1;
+			gJitFlushRequest = 1;
+		} else if (!gPendingMouseEvent && gClickArmed) {
+			gClickArmed = 0;
+			gJitFlushRequest = 1;
+		}
+		if (gJitFlushRequest) {
+			gJitFlushRequest = 0;
+			jitc_flush_all_now();
+		}
 	}
 
 	if (gShimPending) {
