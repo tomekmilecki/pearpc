@@ -85,9 +85,25 @@ static const uint8 gMouseReport[] = {
 	0x09, 0x38,		/*     Usage (Wheel)			*/
 	0x15, 0x81,		/*     Logical Minimum (-127)		*/
 	0x25, 0x7f,		/*     Logical Maximum (127)		*/
+	/*
+	 * Declare a real resolution.  Without Physical/Unit items a host has no
+	 * way to convert counts to distance, and a driver that scales motion by
+	 * units-per-inch can end up multiplying it by zero -- which looks exactly
+	 * like what happens here: buttons reach Mac OS, motion does not.  Buttons
+	 * need no scaling, which is why they were unaffected.
+	 *
+	 * Logical range 254 counts over a physical 0.64in (unit exponent -2, so
+	 * +/-64 hundredths) works out to ~400 counts per inch, an ordinary mouse.
+	 */
+	0x35, 0xc0,		/*     Physical Minimum (-64)		*/
+	0x45, 0x40,		/*     Physical Maximum (64)		*/
+	0x65, 0x13,		/*     Unit (English Linear, inch)	*/
+	0x55, 0x0e,		/*     Unit Exponent (-2)		*/
 	0x75, 0x08,		/*     Report Size (8)			*/
 	0x95, 0x03,		/*     Report Count (3)			*/
 	0x81, 0x06,		/*     Input (Data, Variable, Relative)	*/
+	0x65, 0x00,		/*     Unit (None) -- reset		*/
+	0x55, 0x00,		/*     Unit Exponent (0) -- reset	*/
 	0xc0,			/*   End Collection			*/
 	0xc0			/* End Collection			*/
 };

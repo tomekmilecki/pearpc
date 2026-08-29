@@ -2448,7 +2448,10 @@ static void *cudaEventLoop(void *arg)
 				/* Park the pointer exactly on the "IGA" row of the login
 				 * list, so the click test does not depend on how many
 				 * relative steps happened to be applied. */
-				sint16 tv = 187, th = 337;
+				/* Park on the "parzej" row, not IGA: the Down-arrow probe in
+				 * this same script selects IGA, so a click there would be
+				 * indistinguishable from the keystroke. */
+				sint16 tv = 237, th = 337;
 				uint8 pt[4] = { (uint8)(tv>>8), (uint8)tv,
 				                (uint8)(th>>8), (uint8)th };
 				ppc_dma_write(LOMEM_BASE + 0x82c, pt, 4);	/* RawMouse */
