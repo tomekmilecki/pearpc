@@ -1325,11 +1325,10 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
      * The keyboard driver's own context is the one that returns noErr.
      */
     if (aJITC.current_opc == 0x8182ff20) {
-        /* Branch form: the handler redirects npc to inject the call. */
+        /* Plain interpret: the handler only rewrites registers now, it does
+         * not redirect execution, so the block need not end here. */
         ppc_opc_gen_interpret(aJITC, ppc_opc_postevent_trace);
-        aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
-        aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);
-        return flowEndBlockUnreachable;
+        return flowContinue;
     }
     if (aJITC.current_opc == 0x387d0002) {
         ppc_opc_gen_interpret(aJITC, ppc_opc_vinit_trace);

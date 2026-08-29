@@ -2052,6 +2052,12 @@ static void cuda_shim_apply()
 			gSyntheticKeyDown = 1;
 			gSyntheticKeyAt = sys_get_hiresclk_ticks();
 			usb_hid_key_event(gSyntheticKey, true);
+			{	/* Is the provocation actually firing? */
+				static int n = 0;
+				if (n < 10) { n++;
+					fprintf(stderr, "[PROV] cpu-thread key %02x down (pending=%d)\n",
+						gSyntheticKey, gPendingMouseEvent); }
+			}
 		}
 	}
 
@@ -2296,6 +2302,10 @@ static void *cudaEventLoop(void *arg)
 					provDown = 1;
 					provAt = sys_get_hiresclk_ticks();
 					usb_hid_key_event(provKey, true);
+					{	static int n = 0;
+						if (n < 10) { n++;
+							fprintf(stderr, "[PROV] loop key %02x down (pending=%d)\n",
+								provKey, gPendingMouseEvent); } }
 				} else if (provDown && sys_get_hiresclk_ticks() - provAt > per / 40) {
 					provDown = 0;
 					usb_hid_key_event(provKey, false);

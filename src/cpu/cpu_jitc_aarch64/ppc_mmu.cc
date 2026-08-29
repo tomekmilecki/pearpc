@@ -2386,70 +2386,47 @@ extern "C" int ppc_opc_blr_inject(PPC_CPU_State &aCPU)
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
-     * Injection site: ANY CFM import glue, `lwz r12,disp(r2)`.
+     * Turn a keystroke the driver is already posting into a mouse click.
      *
-     * The site has to be a real call site -- at an arbitrary blr the machine
-     * may be in ROM or an interrupt handler and PostEvent returns garbage
-     * instead of an OSErr.  Every glue stub is by definition a valid one, and
-     * unlike PostEvent's own stub (which fires only on guest keyboard
-     * activity, and cannot be provoked) other modules' glue fires constantly.
+     * Calling PostEvent ourselves does not work: it is accepted only from the
+     * keyboard driver's own task context, and no injection site or provocation
+     * reliably puts the machine there.  But the driver reaches this stub FROM
+     * that context on every keystroke -- so rather than make the call, change
+     * the arguments of the one it is already making.  The key is never typed;
+     * a mouse event is posted in its place, from a context PostEvent accepts.
      *
-     * PostEvent itself is identified when its stub happens to run: its TVector
-     * resolves to ROM entry 0xffd095ec, and its entry/TOC are cached for use
-     * at any later site.
+     * The stub is `lwz r12,-224(r2)`, an encoding shared with other modules'
+     * glue, so it is recognised by its resolved target: TVector -> ROM entry
+     * 0xffd095ec.  Only a genuine key event (r3 = 3 keyDown, 4 keyUp) is
+     * displaced, and only while a click is pending -- the provocation
+     * keystroke exists precisely to be displaced.
      */
-    sint16 disp = (sint16)(aCPU.current_opc & 0xffff);
+    uint32 ea = aCPU.gpr[2] - 224;
     uint32 tvec = 0;
-    int r = ppc_read_effective_word(aCPU, aCPU.gpr[2] + (sint32)disp, tvec);
+    int r = ppc_read_effective_word(aCPU, ea, tvec);
     if (r) return r;
-
-    if (gCall.active) {				/* PostEvent returned here */
-        gCall.active = 0;
-        uint32 res = aCPU.gpr[3];
-        for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
-        aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
-        aCPU.npc = gCall.npc;
-        if (res != 0) gPendingMouseEvent = gCallWhat;	/* rejected: retry */
-        static int n = 0;
-        if (n < 24) { n++;
-            fprintf(stderr, "[CALL] returned OSErr=%d (%s)\n", (int)(sint32)res,
-                    res == 0 ? "noErr -- accepted" : "rejected, will retry"); }
-        return 0;
-    }
-
     aCPU.gpr[12] = tvec;			/* the instruction's own effect */
 
-    /* Learn PostEvent's entry/TOC from its own stub when it runs. */
+    uint32 entry = 0;
+    ppc_read_effective_word(aCPU, tvec, entry);
+    if (entry != 0xffd095ecU) return 0;		/* not PostEvent */
+
     if (!gPEEntry) {
-        uint32 entry = 0;
-        ppc_read_effective_word(aCPU, tvec, entry);
-        if (entry == 0xffd095ecU) {
-            gPEEntry = entry;
-            ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
-            fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n",
-                    gPEEntry, gPEToc);
-        }
+        gPEEntry = entry;
+        ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
+        fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
     }
 
     int want = gPendingMouseEvent;
-    /* Only from a sane context: interrupts on and translation on. */
-    const uint32 needMSR = 0x8000u | 0x20u | 0x10u;
-    if (want && gPEEntry && (aCPU.msr & needMSR) == needMSR) {
+    if (want && (aCPU.gpr[3] == 3 || aCPU.gpr[3] == 4)) {
         gPendingMouseEvent = 0;
-        gCallWhat = want;
-        /* Save AFTER the load, so r12 comes back holding the loaded value. */
-        for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
-        gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
-        gCall.npc = aCPU.npc;			/* = pc + 4 */
-        gCall.active = 1;
-        aCPU.gpr[3] = (uint32)want;
-        aCPU.gpr[4] = 0;
-        aCPU.gpr[2] = gPEToc;
-        aCPU.lr  = aCPU.pc;			/* return into this handler */
-        aCPU.npc = gPEEntry;
+        uint32 wasKey = aCPU.gpr[3];
+        aCPU.gpr[3] = (uint32)want;		/* mouseDown = 1, mouseUp = 2 */
+        aCPU.gpr[4] = 0;			/* message unused for mouse */
         static int n = 0;
-        if (n < 24) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at glue %08x\n",
-                                   want, aCPU.pc); }
+        if (n < 20) { n++;
+            fprintf(stderr, "[SWAP] key event %u -> mouse event %d (posted from the "
+                    "driver's own context)\n", wasKey, want); }
     }
     return 0;
 }
