@@ -124,10 +124,21 @@ static bool handleSDLEvent(const SDL_Event &event)
 		ev.mouse.type = sme_buttonPressed;
 		memcpy(tmpMouseButton, mouseButton, sizeof (tmpMouseButton));
 		{
-			SDL_MouseButtonFlags buttons = SDL_GetMouseState(NULL, NULL);
-			mouseButton[0] = buttons & SDL_BUTTON_LMASK;
-			mouseButton[1] = buttons & SDL_BUTTON_MMASK;
-			mouseButton[2] = buttons & SDL_BUTTON_RMASK;
+			/*
+			 * Take the button state from the EVENT, not from a poll.  SDL
+			 * queues events, so SDL_GetMouseState() reports the state at
+			 * dequeue time: on a quick tap the button is already released by
+			 * the time the DOWN event is handled, the poll returns "up", no
+			 * transition is seen and the press is never sent to the guest.
+			 * That is a click silently disappearing.
+			 */
+			int idx = -1;
+			if (event.button.button == SDL_BUTTON_LEFT)   idx = 0;
+			else if (event.button.button == SDL_BUTTON_MIDDLE) idx = 1;
+			else if (event.button.button == SDL_BUTTON_RIGHT)  idx = 2;
+			if (idx >= 0)
+				mouseButton[idx] =
+					(event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
 		}
 		ev.mouse.button1 = mouseButton[0];
 		ev.mouse.button2 = mouseButton[1];
@@ -152,10 +163,21 @@ static bool handleSDLEvent(const SDL_Event &event)
 		ev.mouse.type = sme_buttonReleased;
 		memcpy(tmpMouseButton, mouseButton, sizeof (tmpMouseButton));
 		{
-			SDL_MouseButtonFlags buttons = SDL_GetMouseState(NULL, NULL);
-			mouseButton[0] = buttons & SDL_BUTTON_LMASK;
-			mouseButton[1] = buttons & SDL_BUTTON_MMASK;
-			mouseButton[2] = buttons & SDL_BUTTON_RMASK;
+			/*
+			 * Take the button state from the EVENT, not from a poll.  SDL
+			 * queues events, so SDL_GetMouseState() reports the state at
+			 * dequeue time: on a quick tap the button is already released by
+			 * the time the DOWN event is handled, the poll returns "up", no
+			 * transition is seen and the press is never sent to the guest.
+			 * That is a click silently disappearing.
+			 */
+			int idx = -1;
+			if (event.button.button == SDL_BUTTON_LEFT)   idx = 0;
+			else if (event.button.button == SDL_BUTTON_MIDDLE) idx = 1;
+			else if (event.button.button == SDL_BUTTON_RIGHT)  idx = 2;
+			if (idx >= 0)
+				mouseButton[idx] =
+					(event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
 		}
 		ev.mouse.button1 = mouseButton[0];
 		ev.mouse.button2 = mouseButton[1];
