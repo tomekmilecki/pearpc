@@ -2034,9 +2034,26 @@ static void cuda_shim_apply()
 		gSyntheticKeyDown = 0;
 		usb_hid_key_event(gSyntheticKey, false);
 	}
-	/* (provocation moved to cudaEventLoop: keystrokes injected from the CPU
-	 * thread here never reached the keyboard module, while the same calls
-	 * from the event-loop thread demonstrably do) */
+	/*
+	 * Provoke from the CPU thread as well as the event loop.  This is the path
+	 * the one successful run used -- removing it in favour of the event-loop
+	 * version was a mistake.  Only a keystroke gets the keyboard driver's task
+	 * running, and that task's context is the only one PostEvent accepts the
+	 * call from.  Retry while something is still pending.
+	 */
+	{
+		extern volatile int gPendingMouseEvent;
+		if (gPendingMouseEvent && !gSyntheticKeyDown &&
+		    sys_get_hiresclk_ticks() - gSyntheticKeyAt >
+		        sys_get_hiresclk_ticks_per_second() / 20) {
+			static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
+			static unsigned pi = 0;
+			gSyntheticKey = keys[pi++ % (sizeof keys)];
+			gSyntheticKeyDown = 1;
+			gSyntheticKeyAt = sys_get_hiresclk_ticks();
+			usb_hid_key_event(gSyntheticKey, true);
+		}
+	}
 
 	static const int clickEventsOff = 1;
 	if (!clickEventsOff && gClickHead != gClickTail) {
