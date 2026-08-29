@@ -2035,31 +2035,14 @@ static void cuda_shim_apply()
 		usb_hid_key_event(gSyntheticKey, false);
 	}
 	/*
-	 * Provoke from the CPU thread as well as the event loop.  This is the path
-	 * the one successful run used -- removing it in favour of the event-loop
-	 * version was a mistake.  Only a keystroke gets the keyboard driver's task
-	 * running, and that task's context is the only one PostEvent accepts the
-	 * call from.  Retry while something is still pending.
+	 * Only ONE provocation loop may run.  Two of them -- this one and the
+	 * event-loop one -- pressed and released different keys on independent
+	 * timers, which leaves the HID keyboard report with overlapping presses
+	 * and mismatched releases; the driver then posts nothing at all.  That is
+	 * why [SWAP] never fired even though [PROV] showed keys going in.  The
+	 * event-loop loop is the one kept.
 	 */
-	{
-		extern volatile int gPendingMouseEvent;
-		if (gPendingMouseEvent && !gSyntheticKeyDown &&
-		    sys_get_hiresclk_ticks() - gSyntheticKeyAt >
-		        sys_get_hiresclk_ticks_per_second() / 20) {
-			static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
-			static unsigned pi = 0;
-			gSyntheticKey = keys[pi++ % (sizeof keys)];
-			gSyntheticKeyDown = 1;
-			gSyntheticKeyAt = sys_get_hiresclk_ticks();
-			usb_hid_key_event(gSyntheticKey, true);
-			{	/* Is the provocation actually firing? */
-				static int n = 0;
-				if (n < 10) { n++;
-					fprintf(stderr, "[PROV] cpu-thread key %02x down (pending=%d)\n",
-						gSyntheticKey, gPendingMouseEvent); }
-			}
-		}
-	}
+
 
 	static const int clickEventsOff = 1;
 	if (!clickEventsOff && gClickHead != gClickTail) {
@@ -2295,7 +2278,7 @@ static void *cudaEventLoop(void *arg)
 			static uint8 provKey = 0;
 			uint64 per = sys_get_hiresclk_ticks_per_second();
 			if (gPendingMouseEvent) {
-				if (!provDown && sys_get_hiresclk_ticks() - provAt > per / 20) {
+				if (!provDown && sys_get_hiresclk_ticks() - provAt > per / 8) {
 					static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
 					static unsigned pi = 0;
 					provKey = keys[pi++ % (sizeof keys)];
@@ -2306,7 +2289,7 @@ static void *cudaEventLoop(void *arg)
 						if (n < 10) { n++;
 							fprintf(stderr, "[PROV] loop key %02x down (pending=%d)\n",
 								provKey, gPendingMouseEvent); } }
-				} else if (provDown && sys_get_hiresclk_ticks() - provAt > per / 40) {
+				} else if (provDown && sys_get_hiresclk_ticks() - provAt > per / 16) {
 					provDown = 0;
 					usb_hid_key_event(provKey, false);
 				}
@@ -2390,7 +2373,11 @@ static void *cudaEventLoop(void *arg)
 			}
 			if (pressedAt) {
 				uint64 per = sys_get_hiresclk_ticks_per_second();
-				if (sys_get_hiresclk_ticks() - pressedAt > per * 2) {   /* 2s: give both edges plenty of trap sites */
+				if (sys_get_hiresclk_ticks() - pressedAt > per / 8) {   /* 125ms: a realistic click.
+			 * Holding for seconds keeps MBState reading button-down, and Mac OS
+			 * then sits in a mouse-tracking state and stops processing
+			 * keystrokes -- which is why the provocation could inject keys the
+			 * driver never posted. */
 					pressedAt = 0;
 					usb_hid_mouse_event(0, 0, false, false, false);
 					cuda_shim_mouse(0, 0, false);
