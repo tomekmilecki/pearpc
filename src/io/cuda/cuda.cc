@@ -2332,15 +2332,7 @@ static void *cudaEventLoop(void *arg)
 				 * click it: if MBState alone is enough, the UI reacts and no
 				 * event posting is needed; if not, the Event Manager must be
 				 * fed directly. */
-				/*
-				 * Drive HARD to the top-left.  If Mac OS's own cursor tracks
-				 * our motion at all -- even wildly over-scaled, which would
-				 * explain it sitting pinned at the right edge -- a click after
-				 * this should land top-left (Apple/Help menu) instead of
-				 * top-right.  If it still lands top-right, the Cursor Device
-				 * Manager is ignoring our motion outright.
-				 */
-				usb_hid_mouse_event(-40, -40, false, false, false);
+				usb_hid_mouse_event(11, 8, false, false, false);
 				cuda_shim_mouse(11, 8, false);
 				/*
 				 * Also drive the ADB/CUDA mouse path.  The previous "restore
