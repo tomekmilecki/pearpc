@@ -2378,6 +2378,23 @@ static void *cudaEventLoop(void *arg)
 			/* (Mouse Keys probe removed: Easy Access is not installed, and the
 			 * Cmd-Shift combination raised a modal dialog that masked the
 			 * click test.) */
+			/* Validate the Down arrow: ADB 0x7d must select the next user in
+			 * the login list.  The injector uses ADB codes directly, so this
+			 * exercises the same ADB->HID path a real keypress now takes after
+			 * the SDL->ADB table fix. */
+			static uint64 downAt = 0;
+			static int downState = 0;
+			if (gKeyScript == 100 && !downState) {
+				downState = 1; downAt = sys_get_hiresclk_ticks();
+				usb_hid_key_event(0x7d, true);
+				fprintf(stderr, "[ARROW] Down pressed (ADB 0x7d)\n");
+			}
+			if (downState == 1 &&
+			    sys_get_hiresclk_ticks() - downAt > sys_get_hiresclk_ticks_per_second() / 8) {
+				downState = 2;
+				usb_hid_key_event(0x7d, false);
+				fprintf(stderr, "[ARROW] Down released\n");
+			}
 			static uint64 pressedAt = 0;
 			if (gKeyScript == 420 && !pressedAt) {
 				pressedAt = sys_get_hiresclk_ticks();
