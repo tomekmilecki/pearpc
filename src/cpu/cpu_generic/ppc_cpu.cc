@@ -105,8 +105,6 @@ void ppc_cpu_atomic_raise_dec_exception()
 
 void ppc_cpu_wakeup() {}
 
-void ppc_cpu_vbl_tick() {}
-
 void ppc_cpu_run()
 {
     gDebugger = new Debugger();

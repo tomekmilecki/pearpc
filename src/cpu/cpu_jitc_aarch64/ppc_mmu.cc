@@ -51,7 +51,6 @@
 
 extern PPC_CPU_State *gCPU;
 extern FILE *gTraceLog;
-extern JITC *gJITC;
 
 extern "C" void crash_dump_cpu_state()
 {
@@ -2322,176 +2321,11 @@ volatile int gJitFlushRequest = 0;
 volatile int gCdmHuntUntil = 0;
 volatile uint32 gCursorDeviceRec = 0;
 
-/*
- * MacOnLinux's video.x successfully creates a VideoServicesLib VBL service,
- * but its virtual display has no hardware ISR to call VSLDoInterruptService.
- * The SDL thread records VBL ticks here; the CPU thread consumes one at the
- * existing interpreted poll checkpoint below.  That keeps all guest state
- * access on the CPU thread.
- */
-static uint32 gVslServiceID = 0;
-static uint32 gVslDoEntry = 0;
-static uint32 gVslDoToc = 0;
-static int gVslTickPending = 0;
-
-static struct {
-    bool active;
-    bool redeliverDec;
-    uint32 gpr[32];
-    uint64 fpr[32];
-    uint32 cr, fpscr, xer, xer_ca, lr, ctr, msr;
-    uint32 vscr, vrsave;
-    Vector_t vr[36];
-    uint32 resume;
-    uint32 trampoline;
-    uint32 trampolinePA;
-    uint32 trampolineOpcode;
-    bool invalidateTrampolinePage;
-} gVslCall;
-
-static void ppc_vsl_invalidate_code_page(uint32 pa)
-{
-    if (!gJITC) return;
-    ClientPage *page = gJITC->clientPages[pa >> 12];
-    if (page) jitcDestroyAndFreeClientPage(*gJITC, page);
-}
-
-extern "C" void ppc_vsl_register(uint32 serviceID, uint32 doEntry, uint32 doToc)
-{
-    if (!serviceID || !doEntry || !doToc) return;
-    __atomic_store_n(&gVslServiceID, serviceID, __ATOMIC_RELEASE);
-    __atomic_store_n(&gVslDoEntry, doEntry, __ATOMIC_RELEASE);
-    __atomic_store_n(&gVslDoToc, doToc, __ATOMIC_RELEASE);
-}
-
-extern "C" void ppc_vsl_request_tick()
-{
-    if (__atomic_load_n(&gVslServiceID, __ATOMIC_ACQUIRE)) {
-        __atomic_store_n(&gVslTickPending, 1, __ATOMIC_RELEASE);
-    }
-}
-
-static bool ppc_vsl_maybe_inject(PPC_CPU_State &aCPU, uint32 resume, bool redeliverDec)
-{
-    if (!__atomic_exchange_n(&gVslTickPending, 0, __ATOMIC_ACQ_REL)) return false;
-
-    const uint32 serviceID = __atomic_load_n(&gVslServiceID, __ATOMIC_ACQUIRE);
-    const uint32 entry = __atomic_load_n(&gVslDoEntry, __ATOMIC_ACQUIRE);
-    const uint32 toc = __atomic_load_n(&gVslDoToc, __ATOMIC_ACQUIRE);
-    /* VSLDoInterruptService is normally called by the display ISR, where
-     * interrupts are already masked.  It only needs the normal address-space
-     * translations to be live. */
-    const uint32 needMSR = 0x20u | 0x10u; /* IR | DR */
-    /* A VideoServicesLib callback may re-enter the nanokernel. Defer it until
-     * the interrupted code is an ordinary Mac OS process, never one of the
-     * kernel's high virtual mappings. */
-    const bool safeProcessContext = aCPU.pc < 0x10000000;
-    if (gVslCall.active || !serviceID || !entry || !toc || !safeProcessContext ||
-        (aCPU.msr & needMSR) != needMSR) {
-        __atomic_store_n(&gVslTickPending, 1, __ATOMIC_RELEASE);
-        return false;
-    }
-
-    /* PROM's high virtual mapping is replaced by Mac OS after boot, so the
-     * return address must be in a page that the guest's live MMU maps.  The
-     * instruction immediately before VSLDoInterruptService is the return of
-     * the preceding VSL function.  Temporarily replace that dormant `blr`
-     * with our magic instruction, and restore it once VSLDo returns. */
-    const uint32 trampoline = entry - 4;
-    uint32 trampolinePA = 0;
-    uint32 trampolineOpcode = 0;
-    if ((aCPU.pc & ~0xfffU) == (trampoline & ~0xfffU) ||
-        ppc_effective_to_physical(aCPU, trampoline, PPC_MMU_READ | PPC_MMU_CODE | PPC_MMU_NO_EXC,
-            trampolinePA) != PPC_MMU_OK ||
-        ppc_read_physical_word(trampolinePA, trampolineOpcode) ||
-        trampolineOpcode != 0x4e800020 ||
-        ppc_write_physical_word(trampolinePA, PROM_VSL_RETURN_OPCODE)) {
-        __atomic_store_n(&gVslTickPending, 1, __ATOMIC_RELEASE);
-        return false;
-    }
-    ppc_vsl_invalidate_code_page(trampolinePA);
-
-    memcpy(gVslCall.gpr, aCPU.gpr, sizeof gVslCall.gpr);
-    memcpy(gVslCall.fpr, aCPU.fpr, sizeof gVslCall.fpr);
-    memcpy(gVslCall.vr, aCPU.vr, sizeof gVslCall.vr);
-    gVslCall.cr = aCPU.cr;
-    gVslCall.fpscr = aCPU.fpscr;
-    gVslCall.xer = aCPU.xer;
-    gVslCall.xer_ca = aCPU.xer_ca;
-    gVslCall.lr = aCPU.lr;
-    gVslCall.ctr = aCPU.ctr;
-    gVslCall.msr = aCPU.msr;
-    gVslCall.vscr = aCPU.vscr;
-    gVslCall.vrsave = aCPU.vrsave;
-    gVslCall.resume = resume;
-    gVslCall.redeliverDec = redeliverDec;
-    gVslCall.trampoline = trampoline;
-    gVslCall.trampolinePA = trampolinePA;
-    gVslCall.trampolineOpcode = trampolineOpcode;
-    gVslCall.invalidateTrampolinePage = true;
-    gVslCall.active = true;
-
-    aCPU.gpr[2] = toc;
-    aCPU.gpr[3] = serviceID;
-    /* Match the ABI frame created by Mac OS's CallMacOS1 helper before it
-     * enters a CFM TVector.  VSLDo's prologue uses this caller frame. */
-    aCPU.gpr[1] -= 64;
-    aCPU.lr = trampoline;
-    /* VSLDoInterruptService is run by a VBL interrupt handler.  Do not let a
-     * second guest interrupt preempt that handler. */
-    aCPU.msr &= ~MSR_EE;
-    aCPU.npc = entry;
-
-    return true;
-}
-
-/* Called from the decrementer heartbeat before it vectors into the guest's
- * normal DEC handler.  The return trampoline re-raises that DEC afterwards,
- * so VBL delivery never steals a guest timer tick. */
-extern "C" int ppc_vsl_maybe_inject_dec(PPC_CPU_State &aCPU, uint32 resume)
-{
-    return ppc_vsl_maybe_inject(aCPU, resume, true) ? 1 : 0;
-}
-
-extern "C" int ppc_opc_vsl_return(PPC_CPU_State &aCPU)
-{
-    if (!gVslCall.active || aCPU.pc != gVslCall.trampoline) return 1;
-
-    ppc_write_physical_word(gVslCall.trampolinePA, gVslCall.trampolineOpcode);
-
-    memcpy(aCPU.gpr, gVslCall.gpr, sizeof aCPU.gpr);
-    memcpy(aCPU.fpr, gVslCall.fpr, sizeof aCPU.fpr);
-    memcpy(aCPU.vr, gVslCall.vr, sizeof aCPU.vr);
-    aCPU.cr = gVslCall.cr;
-    aCPU.fpscr = gVslCall.fpscr;
-    aCPU.xer = gVslCall.xer;
-    aCPU.xer_ca = gVslCall.xer_ca;
-    aCPU.lr = gVslCall.lr;
-    aCPU.ctr = gVslCall.ctr;
-    aCPU.msr = gVslCall.msr;
-    aCPU.vscr = gVslCall.vscr;
-    aCPU.vrsave = gVslCall.vrsave;
-    aCPU.npc = gVslCall.resume;
-    bool redeliverDec = gVslCall.redeliverDec;
-    gVslCall.active = false;
-    if (redeliverDec) ppc_cpu_atomic_raise_dec_exception(aCPU);
-    return 0;
-}
-
-/* The return opcode's JIT fragment is still executing when
- * ppc_opc_vsl_return() restores the original `blr`.  Destroy that fragment
- * only after control has moved into this permanent assembly stub. */
-extern "C" void ppc_vsl_finish_return(PPC_CPU_State *)
-{
-    if (!gVslCall.invalidateTrampolinePage) return;
-    gVslCall.invalidateTrampolinePage = false;
-    ppc_vsl_invalidate_code_page(gVslCall.trampolinePA);
-}
-
 /* Flush every translation so a change to gClickArmed takes effect.  Must run
  * on the CPU thread.  Wrapped in C linkage because cuda.cc cannot see JITC. */
 extern "C" void jitc_flush_all_now()
 {
+    extern JITC *gJITC;
     if (gJITC) gJITC->invalidateAll();
 }
 

@@ -1229,9 +1229,6 @@ extern "C" int ppc_opc_iif_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_vinit_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &);
 extern "C" int ppc_opc_blr_inject(PPC_CPU_State &);
-extern "C" int ppc_opc_vsl_return(PPC_CPU_State &);
-extern "C" void ppc_vsl_return_dispatch_asm();
-extern "C" void ppc_vsl_register(uint32 serviceID, uint32 doEntry, uint32 doToc);
 
 /*
  * video.x calls VSLNewInterruptService(&entry, 'vbl ', &serviceID) at module
@@ -1242,44 +1239,24 @@ extern "C" void ppc_vsl_register(uint32 serviceID, uint32 doEntry, uint32 doToc)
  * result: addis r4,r0,0x7662 (building 'vbl ') and extsh r3,r3 (the returned
  * OSStatus).  Chosen at translation time so the instruction identity is exact.
  */
-static bool gVslRegistrationPending = false;
-
 extern "C" int ppc_opc_vsl_trace(PPC_CPU_State &aCPU)
 {
     uint32 opc = aCPU.current_opc;
     if (opc == 0x3c807662) {
-        gVslRegistrationPending = true;
+        static int n = 0;
+        if (n < 8) { n++; fprintf(stderr, "[VSL] about to call VSLNewInterruptService('vbl ')\n"); }
         aCPU.gpr[4] = 0x76620000;               /* addis r4,r0,0x7662 */
     } else if (opc == 0x7c630734) {
         uint32 v = aCPU.gpr[3];
+        static int n = 0;
+        if (n < 24) {
+            n++;
+            fprintf(stderr, "[VSL] result r3=%08x (%d)%s\n", v, (int)(sint32)v,
+                v ? "   <== ERROR: driver skips claiming the interrupt" : "   noErr");
+        }
         aCPU.gpr[3] = (uint32)(sint32)(sint16)(v & 0xffff);  /* extsh r3,r3 */
     }
     return 0;
-}
-
-extern "C" int ppc_opc_vsl_ready_trace(PPC_CPU_State &aCPU)
-{
-    if (!gVslRegistrationPending) return ppc_opc_stb(aCPU);
-    gVslRegistrationPending = false;
-    uint32 serviceID = 0;
-    uint32 newServiceTVector = 0;
-    uint32 newServiceEntry = 0;
-    uint32 newServiceToc = 0;
-    uint32 doServiceTVector = 0;
-    uint32 doServiceEntry = 0;
-    uint32 doServiceToc = 0;
-    ppc_read_effective_word(aCPU, aCPU.gpr[31] + 96, serviceID);
-    if (!ppc_read_effective_word(aCPU, aCPU.gpr[2] + 0x3c, newServiceTVector)) {
-        ppc_read_effective_word(aCPU, newServiceTVector, newServiceEntry);
-        ppc_read_effective_word(aCPU, newServiceTVector + 4, newServiceToc);
-        /* VSLDoInterruptService is the next exported vector after New and
-         * Dispose in VideoServicesLib's packed data section. */
-        doServiceTVector = newServiceTVector + 0x10;
-        ppc_read_effective_word(aCPU, doServiceTVector, doServiceEntry);
-        ppc_read_effective_word(aCPU, doServiceTVector + 4, doServiceToc);
-    }
-    ppc_vsl_register(serviceID, doServiceEntry, doServiceToc);
-    return ppc_opc_stb(aCPU);
 }
 
 
@@ -1317,16 +1294,6 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
     if (aJITC.current_opc == 0x3c807662) {
         ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_trace);
         return flowContinue;
-    }
-    if (aJITC.current_opc == 0x981f005d) {
-        ppc_opc_gen_interpret_loadstore(aJITC, ppc_opc_vsl_ready_trace);
-        return flowContinue;
-    }
-    if (aJITC.current_opc == PROM_VSL_RETURN_OPCODE) {
-        ppc_opc_gen_interpret(aJITC, ppc_opc_vsl_return);
-        aJITC.asmMOV64(X16, (uint64)(NativeAddress)ppc_vsl_return_dispatch_asm);
-        aJITC.asmBR(X16);
-        return flowEndBlockUnreachable;
     }
     /*
      * blr is trapped only while a click is actually pending.  Trapping it
