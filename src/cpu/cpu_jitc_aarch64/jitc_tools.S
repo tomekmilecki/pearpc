@@ -148,6 +148,22 @@ do_export EXTERN(ppc_new_pc_asm)
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 //
+//  ppc_vsl_return_dispatch_asm
+//
+//  Reaches a permanent assembly page after the temporary VSL trampoline
+//  restored its guest instruction.  It can now invalidate the JIT page that
+//  contained that magic opcode, then resume the interrupted guest PC.
+//
+.p2align 4
+do_export EXTERN(ppc_vsl_return_dispatch_asm)
+    mov x0, x20
+    bl  EXTERN(ppc_vsl_finish_return)
+    ldr w0, [x20, #npc]
+    b   EXTERN(ppc_new_pc_asm)
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+//
 //  ppc_new_pc_rel_asm
 //
 //  IN: w0 = new client pc relative to current_code_base
@@ -453,12 +469,8 @@ do_export EXTERN(ppc_ext_exception_asm)
 //
 .p2align 4
 do_export EXTERN(ppc_dec_exception_asm)
-    str w0, [x20, #srr0]
-    ldr w3, [x20, #msr]
-    mov w16, #0xffff
-    movk    w16, #0x87c0, lsl #16
-    and w3, w3, w16
-    str w3, [x20, #srr1]
+    // Preserve the interrupted effective PC across the helper call below.
+    mov w22, w0
     // Atomically clear dec_exception and exception_pending.
     // Must be atomic — the timer thread can set them between stores.
     // Use load-exclusive/store-exclusive to clear dec_exception bit
@@ -473,7 +485,29 @@ do_export EXTERN(ppc_dec_exception_asm)
     orr     w3, w3, w3, lsl #16 // if ext: 0x00010001, else 0x00000000
     stlxr   w4, w3, [x1]
     cbnz    w4, 1b
+
+    // A MacOnLinux video NDRV supplies VSLDoInterruptService but has no
+    // hardware ISR.  Borrow this CPU-thread heartbeat to enter its VBL
+    // service.  The return trampoline re-raises DEC, so the guest still sees
+    // the timer interrupt we temporarily deferred.
+    mov     x0, x20
+    mov     w1, w22
+    bl      EXTERN(ppc_vsl_maybe_inject_dec)
+    cbnz    w0, 2f
+
+    // No VSL tick: take the ordinary decrementer exception.
+    str w22, [x20, #srr0]
+    ldr w3, [x20, #msr]
+    mov w16, #0xffff
+    movk    w16, #0x87c0, lsl #16
+    and w3, w3, w16
+    str w3, [x20, #srr1]
     exception_epilogue 0x900
+2:
+    // The helper set npc to VSLDoInterruptService.  Do not clear MSR or
+    // overwrite SRR0/SRR1; this is a normal CFM call, not a guest exception.
+    ldr w0, [x20, #npc]
+    b EXTERN(ppc_new_pc_asm)
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 //  ppc_program_exception_asm

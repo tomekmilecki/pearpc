@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <cstdlib>
 #include "usbhid.h"
+#include "cpu/cpu.h"
 
 #include <cstring>
 
@@ -442,6 +443,10 @@ void usbhid_mouse_event(USBHIDDevice &d, int dx, int dy, bool b1, bool b2, bool 
 	d.buttons = (uint8)((b1 ? 1 : 0) | (b2 ? 2 : 0) | (b3 ? 4 : 0));
 	d.reportPending = true;
 	d.eventsIn++;
+	/* The virtual display driver owns no physical VBL interrupt. Request its
+	 * VSL service only for a real report, avoiding calls while the guest boots
+	 * through its own interrupt machinery. */
+	ppc_cpu_vbl_tick();
 }
 
 /*

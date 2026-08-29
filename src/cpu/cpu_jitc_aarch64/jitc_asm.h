@@ -60,6 +60,7 @@ extern "C" void ppc_flush_flags_unsigned_0_asm();
 extern "C" void ppc_new_pc_asm();
 extern "C" void ppc_new_pc_rel_asm();
 extern "C" void ppc_new_pc_this_page_asm();
+extern "C" void ppc_vsl_return_dispatch_asm();
 extern "C" void ppc_heartbeat_ext_asm();
 extern "C" void ppc_heartbeat_ext_rel_asm();
 

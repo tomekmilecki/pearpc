@@ -24,6 +24,7 @@
 #include "system/types.h"
 #define PROM_MAGIC_OPCODE 0x00345678
 #define PROM_RTAS_MAGIC_OPCODE 0x00345679
+#define PROM_VSL_RETURN_OPCODE 0x0034567a
 #define PROM_REAL_MODE_ENTRY 0xfffffff0
 
 extern uint32 gPromOSIEntry;

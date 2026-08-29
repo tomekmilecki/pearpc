@@ -110,6 +110,13 @@ void ppc_cpu_wakeup()
     sys_signal_semaphore(gCPUDozeSem);
 }
 
+extern "C" void ppc_vsl_request_tick();
+
+void ppc_cpu_vbl_tick()
+{
+    ppc_vsl_request_tick();
+}
+
 static void decTimerCB(sys_timer t)
 {
     /* The C++ ppc_exception() DEC counter reads zero, but the JIT delivers DEC

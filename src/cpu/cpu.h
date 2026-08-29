@@ -32,6 +32,9 @@ void	ppc_cpu_init_config();
 
 void	ppc_cpu_stop();
 void	ppc_cpu_wakeup();
+/* Called when a mouse report arrives. Backends which can service the classic
+ * VideoServicesLib VBL callback consume this as a pending tick. */
+void	ppc_cpu_vbl_tick();
 
 void	ppc_cpu_crash_dump(int code);
 void	ppc_fatal(const char *fmt, ...);

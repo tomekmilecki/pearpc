@@ -108,6 +108,8 @@ void ppc_cpu_wakeup()
 	sys_signal_semaphore(gCPUDozeSem);
 }
 
+void ppc_cpu_vbl_tick() {}
+
 static void decTimerCB(sys_timer t)
 {
 	ppc_cpu_atomic_raise_dec_exception(*gCPU);
