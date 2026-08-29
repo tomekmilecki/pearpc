@@ -1909,7 +1909,6 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 				gMouseEvTail = nxt;
 			}
 			gPendingMouseEvent = b ? 1 : 2;	/* keeps provocation running */
-			if (!gClickArmed) { gClickArmed = 1; gJitFlushRequest = 1; }
 		}
 		{
 			static int n = 0;
@@ -1946,14 +1945,14 @@ static void cuda_shim_apply()
 		extern volatile int gPendingMouseEvent;
 		extern volatile int gClickArmed;
 		extern volatile int gJitFlushRequest;
-		if (gClickArmed && !gPendingMouseEvent) {
-			gClickArmed = 0;		/* delivered: back to full speed */
-			gJitFlushRequest = 1;
-		}
-		if (gJitFlushRequest) {
-			gJitFlushRequest = 0;
-			jitc_flush_all_now();
-		}
+		/*
+		 * No JIT flush.  It existed only to make the blr trap appear/disappear,
+		 * and that trap is gone -- but the flush stayed, throwing away every
+		 * translation at exactly the moment the guest needs to be responsive
+		 * enough to process the provocation keystroke.  That is very likely why
+		 * the keys went in and the driver posted nothing.
+		 */
+		(void)gClickArmed; (void)gJitFlushRequest;
 	}
 
 	if (gShimPending) {
@@ -2289,6 +2288,10 @@ static void *cudaEventLoop(void *arg)
 			extern volatile int gMouseEvHead, gMouseEvTail;
 			if (gMouseEvHead != gMouseEvTail) {
 				if (!provDown && sys_get_hiresclk_ticks() - provAt > per / 8) {
+					/* Harmless keys, not Return: provoking with Return works
+					 * (it selects a user, proving synthetic keystrokes still
+					 * reach the UI) but it also drives the login screen, which
+					 * confuses what a click test is measuring. */
 					static const uint8 keys[] = { 0x00, 0x01, 0x02, 0x03 };
 					static unsigned pi = 0;
 					provKey = keys[pi++ % (sizeof keys)];
