@@ -50,6 +50,7 @@
 #include "system/systhread.h"
 #include "configparser.h"
 
+#include <cstdio>
 #include "cuda.h"
 
 #define IO_CUDA_TRACE2(str...)
@@ -554,6 +555,7 @@ static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 static volatile int gClickRing[CLICK_RING];
 static volatile int gClickHead = 0, gClickTail = 0;
 static int gSyntheticKeyDown = 0;
+static int gHeldShot = 0;
 static int gLastPostedButton = 0;
 static uint64 gSyntheticKeyAt = 0;
 static uint8 gSyntheticKey = 0;
@@ -2498,6 +2500,23 @@ static void *cudaEventLoop(void *arg)
 				usb_hid_mouse_event(0, 0, true, false, false);
 				cuda_shim_mouse(0, 0, true);
 				fprintf(stderr, "[CLICK] button DOWN\n");
+			}
+			/*
+			 * Dump the screen WHILE the button is held.  A click on the menu
+			 * bar opens a menu that closes again on release, so every dump
+			 * taken after the release showed "no change" -- destroying the
+			 * evidence of where the click actually landed.  The user sees a
+			 * menu open top-right; this is how to see the same thing.
+			 */
+			if (pressedAt && !gHeldShot &&
+			    sys_get_hiresclk_ticks() - pressedAt >
+			        sys_get_hiresclk_ticks_per_second() / 20) {
+				gHeldShot = 1;
+				gcard_dump_framebuffer();
+				/* Keep it: the probe dumps to the same path later and would
+				 * overwrite the one frame that shows where the click landed. */
+				rename("/tmp/pearpc-fb.ppm", "/tmp/pearpc-fb-held.ppm");
+				fprintf(stderr, "[HELDSHOT] captured with button down -> /tmp/pearpc-fb-held.ppm\n");
 			}
 			if (pressedAt) {
 				uint64 per = sys_get_hiresclk_ticks_per_second();
