@@ -1749,6 +1749,7 @@ static volatile int gShimPending;
  * GetMouse()/Button() inside the guest now see the right position.
  */
 static int gCudaShimEnabled = 1;
+static int gShimQuiet = 0;
 /*
  * Post a mouse event into Mac OS's OS event queue, the way PostEvent does.
  *
@@ -2011,7 +2012,44 @@ static void cuda_shim_apply()
 		}
 	}
 
-	if (gShimPending) {
+	/*
+	 * Does our Mouse write survive?  The shim rewrites it constantly, so every
+	 * probe so far read back our own value microseconds later.  Park a known
+	 * value, stop writing for two seconds, and read it again: if Mac OS has
+	 * replaced it, then Mac OS maintains that global from its own cursor and
+	 * our writes are being clobbered -- which would explain clicks landing at
+	 * a fixed spot no matter where the drawn pointer is.
+	 */
+	{
+		extern volatile uint32 gCursorDeviceRec;
+		(void)gCursorDeviceRec;
+		static int phase = 0;
+		static uint64 at = 0;
+		static int done = 0;
+		if (!done && gCudaShimEnabled) {
+			uint64 now = sys_get_hiresclk_ticks();
+			uint64 per = sys_get_hiresclk_ticks_per_second();
+			if (phase == 0 && !at) { at = now; phase = 1; }
+			else if (phase == 1 && now - at > per * 25) {
+				sint16 tv = 100, th = 200;
+				uint8 pt[4] = { (uint8)(tv>>8), (uint8)tv, (uint8)(th>>8), (uint8)th };
+				ppc_dma_write(LOMEM_BASE + LOMEM_MOUSE, pt, 4);
+				gShimQuiet = 1;			/* stop the shim rewriting it */
+				at = now; phase = 2;
+				fprintf(stderr, "[PERSIST] parked Mouse=(v=100,h=200), shim quiet\n");
+			} else if (phase == 2 && now - at > per * 2) {
+				uint8 mo[4] = {0,0,0,0};
+				ppc_dma_read(mo, LOMEM_BASE + LOMEM_MOUSE, 4);
+				sint16 v = (sint16)((mo[0]<<8)|mo[1]), h = (sint16)((mo[2]<<8)|mo[3]);
+				fprintf(stderr, "[PERSIST] after 2s Mouse=(v=%d,h=%d) -> %s\n", v, h,
+					(v == 100 && h == 200) ? "UNCHANGED: Mac OS does not maintain it"
+					                       : "OVERWRITTEN by Mac OS");
+				gShimQuiet = 0; done = 1;
+			}
+		}
+	}
+
+	if (gShimPending && !gShimQuiet) {
 		int dx = gShimDx, dy = gShimDy;
 		bool button = gShimButton != 0;
 		gShimDx -= dx;
