@@ -554,6 +554,7 @@ static unsigned long gT1Raises = 0, gCudaIrqAsserts = 0;
 static volatile int gClickRing[CLICK_RING];
 static volatile int gClickHead = 0, gClickTail = 0;
 static int gSyntheticKeyDown = 0;
+static int gLastPostedButton = 0;
 static uint64 gSyntheticKeyAt = 0;
 static uint8 gSyntheticKey = 0;
 uint32 gLastPostedEl = 0;
@@ -1961,27 +1962,29 @@ static void cuda_shim_apply()
 	 * PEARPC_CLICK_HIJACK=1 to continue the experiment.
 	 */
 	static const int hijackOn = getenv("PEARPC_CLICK_HIJACK") ? 1 : 0;
-	if (hijackOn && gClickHead != gClickTail && !gPendingMouseEvent) {
-		gPendingMouseEvent = gClickRing[gClickHead];
-		gClickHead = (gClickHead + 1) % CLICK_RING;
-		/*
-		 * Force a PostEvent call to hijack: idle Mac OS makes none, and the
-		 * keyboard reliably does.  The synthetic key's own keyDown is what
-		 * gets displaced, so nothing is ever typed.
-		 */
-		gSyntheticKey = 0x00;
-		usb_hid_key_event(gSyntheticKey, true);
-		gSyntheticKeyDown = 1;
-		gSyntheticKeyAt = sys_get_hiresclk_ticks();
-		{
+	/*
+	 * Post button edges by comparing the CURRENT button state against the last
+	 * state actually posted, rather than draining a ring.  The ring lost an
+	 * edge whenever the button changed while a previous one was still pending:
+	 * the mouseDown would go out and the mouseUp never would, leaving a
+	 * dangling press that the UI ignores.  Comparing state cannot lose one --
+	 * whatever the button ends up doing, the next drain notices the
+	 * difference and posts it.
+	 */
+	if (hijackOn && !gPendingMouseEvent) {
+		int cur = gShimButton ? 1 : 0;
+		if (cur != gLastPostedButton) {
+			gLastPostedButton = cur;
+			gPendingMouseEvent = cur ? 1 : 2;	/* mouseDown : mouseUp */
 			static int n = 0;
-			if (n < 8) {
+			if (n < 20) {
 				n++;
-				fprintf(stderr, "[DRAIN2] armed mouse event %d, synthetic key down\n",
-					gPendingMouseEvent);
+				fprintf(stderr, "[DRAIN2] armed mouse event %d (button now %d)\n",
+					gPendingMouseEvent, cur);
 			}
 		}
 	}
+
 	/*
 	 * Release the synthetic key on a timer, not on the hijack completing:
 	 * gating it on that deadlocks -- the key stays held, the guest posts
