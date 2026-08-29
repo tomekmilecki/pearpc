@@ -1894,8 +1894,14 @@ void cuda_shim_mouse(int dx, int dy, bool button)
 		extern volatile int gPendingMouseEvent;
 		extern volatile int gClickArmed;
 		extern volatile int gJitFlushRequest;
-		gPendingMouseEvent = b ? 1 : 2;		/* mouseDown : mouseUp */
-		if (!gClickArmed) { gClickArmed = 1; gJitFlushRequest = 1; }
+		/* Experiment only.  Without this gate the default build would arm
+		 * clicks and inject guest calls that are rejected from most contexts,
+		 * which is both useless and a stability risk. */
+		static const int armOn = getenv("PEARPC_CLICK_HIJACK") ? 1 : 0;
+		if (armOn) {
+			gPendingMouseEvent = b ? 1 : 2;	/* mouseDown : mouseUp */
+			if (!gClickArmed) { gClickArmed = 1; gJitFlushRequest = 1; }
+		}
 		{
 			static int n = 0;
 			if (n < 20) {

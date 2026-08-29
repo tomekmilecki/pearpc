@@ -2386,18 +2386,21 @@ extern "C" int ppc_opc_blr_inject(PPC_CPU_State &aCPU)
 extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 {
     /*
-     * Inject the PostEvent call HERE, at the keyboard module's CFM import
-     * stub -- a real call site with a valid frame.  Arbitrary blr sites do not
-     * work: the call returns garbage instead of an OSErr, because the machine
-     * may be anywhere (ROM, an interrupt handler).  At this stub the call
-     * returns noErr and Mac OS acts on the event.
+     * Injection site: ANY CFM import glue, `lwz r12,disp(r2)`.
      *
-     * The stub is recognised by its resolved target (TVector -> ROM entry
-     * 0xffd095ec); the encoding alone is shared with other modules' glue.
+     * The site has to be a real call site -- at an arbitrary blr the machine
+     * may be in ROM or an interrupt handler and PostEvent returns garbage
+     * instead of an OSErr.  Every glue stub is by definition a valid one, and
+     * unlike PostEvent's own stub (which fires only on guest keyboard
+     * activity, and cannot be provoked) other modules' glue fires constantly.
+     *
+     * PostEvent itself is identified when its stub happens to run: its TVector
+     * resolves to ROM entry 0xffd095ec, and its entry/TOC are cached for use
+     * at any later site.
      */
-    uint32 ea = aCPU.gpr[2] - 224;
+    sint16 disp = (sint16)(aCPU.current_opc & 0xffff);
     uint32 tvec = 0;
-    int r = ppc_read_effective_word(aCPU, ea, tvec);
+    int r = ppc_read_effective_word(aCPU, aCPU.gpr[2] + (sint32)disp, tvec);
     if (r) return r;
 
     if (gCall.active) {				/* PostEvent returned here */
@@ -2406,10 +2409,9 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
         for (int i = 0; i <= 12; i++) aCPU.gpr[i] = gCall.gpr[i];
         aCPU.lr = gCall.lr; aCPU.ctr = gCall.ctr; aCPU.cr = gCall.cr;
         aCPU.npc = gCall.npc;
-        aCPU.gpr[3] = 0;			/* neuter the borrowed call */
         if (res != 0) gPendingMouseEvent = gCallWhat;	/* rejected: retry */
         static int n = 0;
-        if (n < 20) { n++;
+        if (n < 24) { n++;
             fprintf(stderr, "[CALL] returned OSErr=%d (%s)\n", (int)(sint32)res,
                     res == 0 ? "noErr -- accepted" : "rejected, will retry"); }
         return 0;
@@ -2417,19 +2419,25 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
 
     aCPU.gpr[12] = tvec;			/* the instruction's own effect */
 
-    uint32 entry = 0;
-    ppc_read_effective_word(aCPU, tvec, entry);
-    if (entry != 0xffd095ecU) return 0;		/* not PostEvent's stub */
+    /* Learn PostEvent's entry/TOC from its own stub when it runs. */
     if (!gPEEntry) {
-        gPEEntry = entry;
-        ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
-        fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n", gPEEntry, gPEToc);
+        uint32 entry = 0;
+        ppc_read_effective_word(aCPU, tvec, entry);
+        if (entry == 0xffd095ecU) {
+            gPEEntry = entry;
+            ppc_read_effective_word(aCPU, tvec + 4, gPEToc);
+            fprintf(stderr, "[CALL] PostEvent located: entry=%08x toc=%08x\n",
+                    gPEEntry, gPEToc);
+        }
     }
 
     int want = gPendingMouseEvent;
-    if (want) {
+    /* Only from a sane context: interrupts on and translation on. */
+    const uint32 needMSR = 0x8000u | 0x20u | 0x10u;
+    if (want && gPEEntry && (aCPU.msr & needMSR) == needMSR) {
         gPendingMouseEvent = 0;
         gCallWhat = want;
+        /* Save AFTER the load, so r12 comes back holding the loaded value. */
         for (int i = 0; i <= 12; i++) gCall.gpr[i] = aCPU.gpr[i];
         gCall.lr = aCPU.lr; gCall.ctr = aCPU.ctr; gCall.cr = aCPU.cr;
         gCall.npc = aCPU.npc;			/* = pc + 4 */
@@ -2437,10 +2445,11 @@ extern "C" int ppc_opc_postevent_trace(PPC_CPU_State &aCPU)
         aCPU.gpr[3] = (uint32)want;
         aCPU.gpr[4] = 0;
         aCPU.gpr[2] = gPEToc;
-        aCPU.lr  = aCPU.pc;
+        aCPU.lr  = aCPU.pc;			/* return into this handler */
         aCPU.npc = gPEEntry;
         static int n = 0;
-        if (n < 20) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at stub\n", want); }
+        if (n < 24) { n++; fprintf(stderr, "[CALL] invoking PostEvent(%d) at glue %08x\n",
+                                   want, aCPU.pc); }
     }
     return 0;
 }

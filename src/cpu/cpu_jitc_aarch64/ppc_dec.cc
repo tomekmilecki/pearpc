@@ -1310,7 +1310,21 @@ JITCFlow FASTCALL ppc_gen_opc(JITC &aJITC)
         aJITC.asmCALL_cpu(PPC_STUB_NEW_PC);
         return flowEndBlockUnreachable;
     }
-    if (aJITC.current_opc == 0x8182ff20) {	/* PostEvent import stub */
+    /*
+     * CFM import glue (lwz r12,d(r2)) is a common encoding, and dispatching it
+     * as a branch ends a JIT block every time.  Trap it only while a click is
+     * actually pending -- gClickArmed is set at the button edge and the JIT is
+     * flushed so the change takes effect -- so the default build is untouched.
+     */
+    extern volatile int gClickArmed;
+    /*
+     * Trap only PostEvent's own stub (rare encoding, no measurable cost).
+     * The broad glue class was tried and abandoned: those sites are valid CFM
+     * call sites but sit in system/nanokernel context, and PostEvent rejects
+     * the call from there -- every one returned garbage instead of an OSErr.
+     * The keyboard driver's own context is the one that returns noErr.
+     */
+    if (aJITC.current_opc == 0x8182ff20) {
         /* Branch form: the handler redirects npc to inject the call. */
         ppc_opc_gen_interpret(aJITC, ppc_opc_postevent_trace);
         aJITC.asmLDRw_cpu(W0, offsetof(PPC_CPU_State, npc));
